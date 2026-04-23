@@ -1,0 +1,17 @@
+# Data
+data/
+
+# Frontend build output (embedded into Go binary at build time)
+backend/static/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Go
+backend/quickfiles
+*.exe
+
+# OS
+.DS_Store
+Thumbs.db

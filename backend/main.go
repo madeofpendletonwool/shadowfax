@@ -39,7 +39,7 @@ type FileInfo struct {
 type TransferResponse struct {
 	Pin       string     `json:"pin"`
 	ExpiresAt time.Time  `json:"expires_at"`
-	Files     []FileInfo `json:"files,omitempty"`
+	Files     []FileInfo `json:"files"`
 	Text      string     `json:"text,omitempty"`
 }
 
@@ -153,7 +153,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mr := multipart.NewReader(r.Body, boundary)
-	var savedFiles []FileInfo
+	savedFiles := []FileInfo{}
 	var textContent string
 
 	for {
@@ -284,7 +284,7 @@ func handleGetTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var files []FileInfo
+	files := []FileInfo{}
 	for rows.Next() {
 		var f FileInfo
 		if err := rows.Scan(&f.Name, &f.Size); err != nil {

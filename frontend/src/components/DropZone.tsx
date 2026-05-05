@@ -52,6 +52,7 @@ export default function DropZone({ onUploadSuccess }: Props) {
   const [uploading, setUploading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [text, setText] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const addFiles = useCallback((newFiles: FileList | File[]) => {
@@ -94,7 +95,7 @@ export default function DropZone({ onUploadSuccess }: Props) {
   }
 
   const handleUpload = async () => {
-    if (files.length === 0) return
+    if (files.length === 0 && text.trim() === '') return
     setUploading(true)
     setProgress(0)
     setError(null)
@@ -102,6 +103,9 @@ export default function DropZone({ onUploadSuccess }: Props) {
     const formData = new FormData()
     for (const file of files) {
       formData.append('files', file, file.name)
+    }
+    if (text.trim()) {
+      formData.append('text', text.trim())
     }
 
     try {
@@ -141,12 +145,28 @@ export default function DropZone({ onUploadSuccess }: Props) {
   }
 
   const totalSize = files.reduce((acc, f) => acc + f.size, 0)
+  const hasContent = files.length > 0 || text.trim().length > 0
 
   return (
     <div className="space-y-6">
       <div className="text-center space-y-2">
         <h1 className="text-3xl font-bold text-white">Send Files</h1>
         <p className="text-white/50">Drop your files and share with a 4-digit PIN</p>
+      </div>
+
+      {/* Text input */}
+      <div className="glass rounded-2xl p-4 space-y-3">
+        <p className="text-sm font-medium text-white/60">Quick Text</p>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Paste or type text to share between devices..."
+          disabled={uploading}
+          className="w-full h-28 bg-white/5 border border-white/10 rounded-xl px-4 py-3
+            text-sm text-white/90 placeholder-white/30
+            focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30
+            resize-y transition-all duration-200 disabled:opacity-50"
+        />
       </div>
 
       {/* Drop zone */}
@@ -276,10 +296,10 @@ export default function DropZone({ onUploadSuccess }: Props) {
       {/* Upload button */}
       <button
         onClick={handleUpload}
-        disabled={files.length === 0 || uploading}
+        disabled={!hasContent || uploading}
         className={`
           w-full py-4 rounded-2xl font-semibold text-base transition-all duration-200
-          ${files.length > 0 && !uploading
+          ${hasContent && !uploading
             ? 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-xl shadow-indigo-500/20 hover:shadow-indigo-500/30 active:scale-[0.99]'
             : 'bg-white/10 text-white/30 cursor-not-allowed'
           }

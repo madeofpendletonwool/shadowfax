@@ -40,6 +40,7 @@ type TransferResponse struct {
 	Pin       string     `json:"pin"`
 	ExpiresAt time.Time  `json:"expires_at"`
 	Files     []FileInfo `json:"files,omitempty"`
+	Text      string     `json:"text,omitempty"`
 }
 
 var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9._\-]`)
@@ -153,6 +154,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	mr := multipart.NewReader(r.Body, boundary)
 	var savedFiles []FileInfo
+	var textContent string
 
 	for {
 		part, err := mr.NextPart()
@@ -163,6 +165,18 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			log.Printf("multipart error: %v", err)
 			writeError(w, http.StatusBadRequest, "multipart read error")
 			return
+		}
+
+		// Check for text field
+		if part.FormName() == "text" && part.FileName() == "" {
+			buf, err := io.ReadAll(part)
+			part.Close()
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "could not read text field")
+				return
+			}
+			textContent = string(buf)
+			continue
 		}
 
 		originalName := part.FileName()
@@ -215,9 +229,19 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		savedFiles = append(savedFiles, FileInfo{Name: originalName, Size: written})
 	}
 
-	if len(savedFiles) == 0 {
-		writeError(w, http.StatusBadRequest, "no files uploaded")
+	if len(savedFiles) == 0 && textContent == "" {
+		writeError(w, http.StatusBadRequest, "no files or text provided")
 		return
+	}
+
+	// Save text content to the fileset
+	if textContent != "" {
+		_, err = tx.Exec(`UPDATE filesets SET text_content = ? WHERE id = ?`, textContent, filesetID)
+		if err != nil {
+			log.Printf("update text_content error: %v", err)
+			writeError(w, http.StatusInternalServerError, "db error")
+			return
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -229,6 +253,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		Pin:       pin,
 		ExpiresAt: expiresAt,
 		Files:     savedFiles,
+		Text:      textContent,
 	})
 }
 
@@ -238,10 +263,11 @@ func handleGetTransfer(w http.ResponseWriter, r *http.Request) {
 
 	var filesetID int64
 	var expiresAt time.Time
+	var textContent string
 	err := db.QueryRow(
-		`SELECT id, expires_at FROM filesets WHERE pin = ? AND expires_at > datetime('now')`,
+		`SELECT id, expires_at, text_content FROM filesets WHERE pin = ? AND expires_at > datetime('now')`,
 		pin,
-	).Scan(&filesetID, &expiresAt)
+	).Scan(&filesetID, &expiresAt, &textContent)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "transfer not found or expired")
 		return
@@ -271,6 +297,7 @@ func handleGetTransfer(w http.ResponseWriter, r *http.Request) {
 		Pin:       pin,
 		ExpiresAt: expiresAt,
 		Files:     files,
+		Text:      textContent,
 	})
 }
 
@@ -484,7 +511,8 @@ CREATE TABLE IF NOT EXISTS filesets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   pin TEXT UNIQUE NOT NULL,
   created_at DATETIME NOT NULL,
-  expires_at DATETIME NOT NULL
+  expires_at DATETIME NOT NULL,
+  text_content TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -498,6 +526,10 @@ CREATE TABLE IF NOT EXISTS files (
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
+
+	// Migration: add text_content column if missing (for existing databases)
+	db.Exec(`ALTER TABLE filesets ADD COLUMN text_content TEXT NOT NULL DEFAULT ''`)
+
 	return nil
 }
 

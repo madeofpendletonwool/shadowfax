@@ -69,9 +69,26 @@ function ClockIcon() {
   )
 }
 
+function CopyIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+    </svg>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+    </svg>
+  )
+}
+
 export default function FileList({ transfer, onTransferAnother }: Props) {
   const [countdown, setCountdown] = useState(() => formatCountdown(transfer.expires_at))
   const [downloadingAll, setDownloadingAll] = useState(false)
+  const [copiedText, setCopiedText] = useState(false)
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -105,6 +122,13 @@ export default function FileList({ transfer, onTransferAnother }: Props) {
   const isExpired = new Date(transfer.expires_at) <= new Date()
   const totalSize = transfer.files.reduce((acc, f) => acc + f.size, 0)
 
+  const copyText = async () => {
+    if (!transfer.text) return
+    await navigator.clipboard.writeText(transfer.text)
+    setCopiedText(true)
+    setTimeout(() => setCopiedText(false), 2000)
+  }
+
   return (
     <div className="space-y-6 animate-slide-up">
       {/* Header */}
@@ -112,8 +136,15 @@ export default function FileList({ transfer, onTransferAnother }: Props) {
         <h1 className="text-3xl font-bold text-white">Transfer Ready</h1>
         <p className="text-white/50">
           PIN <span className="font-mono text-white font-semibold">{transfer.pin}</span>
-          {' '}&mdash; {transfer.files.length} file{transfer.files.length !== 1 ? 's' : ''}
-          {' '}({formatBytes(totalSize)})
+          {transfer.files.length > 0 && (
+            <>
+              {' '}&mdash; {transfer.files.length} file{transfer.files.length !== 1 ? 's' : ''}
+              {' '}({formatBytes(totalSize)})
+            </>
+          )}
+          {transfer.text && !transfer.files.length && (
+            <>{' '}&mdash; text snippet</>
+          )}
         </p>
       </div>
 
@@ -130,6 +161,31 @@ export default function FileList({ transfer, onTransferAnother }: Props) {
           )}
         </p>
       </div>
+
+      {/* Text content */}
+      {transfer.text && (
+        <div className="glass rounded-2xl overflow-hidden animate-fade-in">
+          <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+            <p className="text-sm font-medium text-white/60">Shared Text</p>
+            <button
+              onClick={copyText}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 ${
+                copiedText
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-white/10 text-white/70 hover:bg-white/20 hover:text-white'
+              }`}
+            >
+              {copiedText ? <CheckIcon /> : <CopyIcon />}
+              {copiedText ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+          <div className="px-4 py-3">
+            <pre className="text-sm text-white/80 whitespace-pre-wrap break-words font-mono bg-white/5 rounded-xl p-4 max-h-64 overflow-y-auto">
+              {transfer.text}
+            </pre>
+          </div>
+        </div>
+      )}
 
       {/* Download all button */}
       {transfer.files.length > 1 && !isExpired && (
@@ -150,33 +206,35 @@ export default function FileList({ transfer, onTransferAnother }: Props) {
       )}
 
       {/* File list */}
-      <div className="glass rounded-2xl overflow-hidden">
-        <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-          <p className="text-sm font-medium text-white/60">Files</p>
-          <p className="text-xs text-white/40">{formatBytes(totalSize)} total</p>
+      {transfer.files.length > 0 && (
+        <div className="glass rounded-2xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+            <p className="text-sm font-medium text-white/60">Files</p>
+            <p className="text-xs text-white/40">{formatBytes(totalSize)} total</p>
+          </div>
+          <div className="divide-y divide-white/5">
+            {transfer.files.map((file, i) => (
+              <div key={i} className="px-4 py-3 flex items-center gap-3 hover:bg-white/5 transition-colors group">
+                <FileIcon />
+                <span className="flex-1 text-sm text-white/80 truncate min-w-0">{file.name}</span>
+                <span className="text-xs text-white/40 flex-shrink-0 mr-2">{formatBytes(file.size)}</span>
+                {!isExpired && (
+                  <button
+                    onClick={() => downloadFile(file.name)}
+                    className="flex-shrink-0 p-2 rounded-lg text-white/40
+                      hover:text-indigo-400 hover:bg-indigo-500/10
+                      opacity-0 group-hover:opacity-100
+                      transition-all duration-200"
+                    title={`Download ${file.name}`}
+                  >
+                    <DownloadIcon />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="divide-y divide-white/5">
-          {transfer.files.map((file, i) => (
-            <div key={i} className="px-4 py-3 flex items-center gap-3 hover:bg-white/5 transition-colors group">
-              <FileIcon />
-              <span className="flex-1 text-sm text-white/80 truncate min-w-0">{file.name}</span>
-              <span className="text-xs text-white/40 flex-shrink-0 mr-2">{formatBytes(file.size)}</span>
-              {!isExpired && (
-                <button
-                  onClick={() => downloadFile(file.name)}
-                  className="flex-shrink-0 p-2 rounded-lg text-white/40
-                    hover:text-indigo-400 hover:bg-indigo-500/10
-                    opacity-0 group-hover:opacity-100
-                    transition-all duration-200"
-                  title={`Download ${file.name}`}
-                >
-                  <DownloadIcon />
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
+      )}
 
       {/* Single file download (if only one file) */}
       {transfer.files.length === 1 && !isExpired && (

@@ -10,6 +10,7 @@ export interface TransferInfo {
   pin: string
   expires_at: string
   files: { name: string; size: number }[]
+  text?: string
 }
 
 function ZapIcon() {

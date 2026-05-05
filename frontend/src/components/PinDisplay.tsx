@@ -145,22 +145,38 @@ export default function PinDisplay({ transfer, onSendAnother }: Props) {
       </div>
 
       {/* File list */}
-      <div className="glass rounded-2xl overflow-hidden">
-        <div className="px-4 py-3 border-b border-white/5">
-          <p className="text-sm font-medium text-white/60">
-            {transfer.files.length} file{transfer.files.length !== 1 ? 's' : ''} uploaded
-          </p>
+      {transfer.files.length > 0 && (
+        <div className="glass rounded-2xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-white/5">
+            <p className="text-sm font-medium text-white/60">
+              {transfer.files.length} file{transfer.files.length !== 1 ? 's' : ''} uploaded
+            </p>
+          </div>
+          <div className="divide-y divide-white/5">
+            {transfer.files.map((file, i) => (
+              <div key={i} className="px-4 py-3 flex items-center gap-3">
+                <FileIcon />
+                <span className="flex-1 text-sm text-white/80 truncate">{file.name}</span>
+                <span className="text-xs text-white/40 flex-shrink-0">{formatBytes(file.size)}</span>
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="divide-y divide-white/5">
-          {transfer.files.map((file, i) => (
-            <div key={i} className="px-4 py-3 flex items-center gap-3">
-              <FileIcon />
-              <span className="flex-1 text-sm text-white/80 truncate">{file.name}</span>
-              <span className="text-xs text-white/40 flex-shrink-0">{formatBytes(file.size)}</span>
-            </div>
-          ))}
+      )}
+
+      {/* Text content confirmation */}
+      {transfer.text && (
+        <div className="glass rounded-2xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-white/5">
+            <p className="text-sm font-medium text-white/60">Text included</p>
+          </div>
+          <div className="px-4 py-3">
+            <pre className="text-sm text-white/60 whitespace-pre-wrap break-words font-mono bg-white/5 rounded-xl p-3 max-h-32 overflow-y-auto">
+              {transfer.text}
+            </pre>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Send another */}
       <button

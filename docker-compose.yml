@@ -2,12 +2,15 @@ services:
   shadowfax:
     image: ghcr.io/madeofpendletonwool/shadowfax:latest
     ports:
-      - "8080:8080"
+      - "8085:8080"
     volumes:
       - shadowfax_data:/data
     environment:
       - PORT=8080
       - DATA_DIR=/data
+      # Optional: require this key (header "X-API-Key: <key>") for uploads/deletes.
+      # Leave unset to keep the API fully open. Downloads are always open.
+      # - API_KEY=change-me
     restart: unless-stopped
 
 volumes:

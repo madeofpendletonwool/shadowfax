@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/subtle"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,10 +32,12 @@ var staticFiles embed.FS
 
 var db *sql.DB
 var dataDir string
+var apiKey string
 
 type FileInfo struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	Name        string `json:"name"`
+	Size        int64  `json:"size"`
+	DownloadURL string `json:"download_url,omitempty"`
 }
 
 type TransferResponse struct {
@@ -41,6 +45,49 @@ type TransferResponse struct {
 	ExpiresAt time.Time  `json:"expires_at"`
 	Files     []FileInfo `json:"files"`
 	Text      string     `json:"text,omitempty"`
+	ShareURL  string     `json:"share_url"`
+	ZipURL    string     `json:"zip_url,omitempty"`
+	Message   string     `json:"message"`
+}
+
+// baseURL reconstructs the public-facing origin from proxy-aware headers,
+// since the app typically runs behind a TLS reverse proxy.
+func baseURL(r *http.Request) string {
+	scheme := "http"
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return scheme + "://" + host
+}
+
+// buildResponse fills in the self-describing URLs and message so callers
+// (including AI agents) can relay results without constructing URLs themselves.
+func buildResponse(r *http.Request, pin string, expiresAt time.Time, files []FileInfo, text string) TransferResponse {
+	base := baseURL(r)
+	enriched := make([]FileInfo, len(files))
+	for i, f := range files {
+		f.DownloadURL = fmt.Sprintf("%s/api/transfer/%s/download/%s", base, pin, url.PathEscape(f.Name))
+		enriched[i] = f
+	}
+	zipURL := ""
+	if len(files) > 0 {
+		zipURL = fmt.Sprintf("%s/api/transfer/%s/zip", base, pin)
+	}
+	return TransferResponse{
+		Pin:       pin,
+		ExpiresAt: expiresAt,
+		Files:     enriched,
+		Text:      text,
+		ShareURL:  fmt.Sprintf("%s/?pin=%s", base, pin),
+		ZipURL:    zipURL,
+		Message:   fmt.Sprintf("Share PIN %s or the link below to let someone download these files. Expires %s.", pin, expiresAt.Format(time.RFC3339)),
+	}
 }
 
 var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9._\-]`)
@@ -76,10 +123,31 @@ func getUniquePIN() (string, error) {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireAPIKey gates write routes when API_KEY is set. When unset the API
+// stays fully open (backwards-compatible). Accepts the key via either the
+// X-API-Key header or an "Authorization: Bearer <key>" header.
+func requireAPIKey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if apiKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		provided := r.Header.Get("X-API-Key")
+		if provided == "" {
+			provided = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(apiKey)) != 1 {
+			writeError(w, http.StatusUnauthorized, "missing or invalid API key: send header 'X-API-Key: <your key>'")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -98,13 +166,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // POST /api/transfer?expiry=<seconds>
 func handleUpload(w http.ResponseWriter, r *http.Request) {
-	expiryStr := r.URL.Query().Get("expiry")
-	expirySecs := int64(3600) // default 1h
-	if expiryStr != "" {
-		if v, err := strconv.ParseInt(expiryStr, 10, 64); err == nil && v > 0 {
-			expirySecs = v
-		}
-	}
+	expirySecs := parseExpiry(r)
 
 	contentType := r.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
@@ -249,12 +311,102 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, TransferResponse{
-		Pin:       pin,
-		ExpiresAt: expiresAt,
-		Files:     savedFiles,
-		Text:      textContent,
-	})
+	writeJSON(w, http.StatusCreated, buildResponse(r, pin, expiresAt, savedFiles, textContent))
+}
+
+// parseExpiry reads the ?expiry=<seconds> query param, defaulting to 1h.
+func parseExpiry(r *http.Request) int64 {
+	expirySecs := int64(3600) // default 1h
+	if expiryStr := r.URL.Query().Get("expiry"); expiryStr != "" {
+		if v, err := strconv.ParseInt(expiryStr, 10, 64); err == nil && v > 0 {
+			expirySecs = v
+		}
+	}
+	return expirySecs
+}
+
+// PUT|POST /api/upload/:filename
+// Foolproof, no-multipart upload: the raw request body is the file contents.
+//
+//	curl -T ./android-sdk.zip https://host/api/upload/android-sdk.zip
+func handleRawUpload(w http.ResponseWriter, r *http.Request) {
+	originalName := chi.URLParam(r, "filename")
+	if originalName == "" {
+		writeError(w, http.StatusBadRequest, "missing filename in path: use /api/upload/<filename>")
+		return
+	}
+	if r.Body == nil {
+		writeError(w, http.StatusBadRequest, "empty request body")
+		return
+	}
+
+	expiresAt := time.Now().UTC().Add(time.Duration(parseExpiry(r)) * time.Second)
+
+	pin, err := getUniquePIN()
+	if err != nil {
+		log.Printf("PIN generation error: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not generate PIN")
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(
+		`INSERT INTO filesets (pin, created_at, expires_at) VALUES (?, ?, ?)`,
+		pin, time.Now().UTC(), expiresAt,
+	)
+	if err != nil {
+		log.Printf("insert fileset error: %v", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	filesetID, _ := res.LastInsertId()
+
+	dir := filepath.Join(dataDir, "files", pin)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not create storage directory")
+		return
+	}
+
+	stored := sanitizeFilename(originalName)
+	f, err := os.Create(filepath.Join(dir, stored))
+	if err != nil {
+		log.Printf("create file error: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not save file")
+		return
+	}
+	written, err := io.Copy(f, r.Body)
+	f.Close()
+	if err != nil {
+		log.Printf("write file error: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not write file")
+		return
+	}
+	if written == 0 {
+		writeError(w, http.StatusBadRequest, "empty request body: send the file as the raw body, e.g. curl -T FILE")
+		return
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO files (fileset_id, original_name, stored_name, size) VALUES (?, ?, ?, ?)`,
+		filesetID, originalName, stored, written,
+	); err != nil {
+		log.Printf("insert file error: %v", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "db commit error")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, buildResponse(r, pin, expiresAt, []FileInfo{{Name: originalName, Size: written}}, ""))
 }
 
 // GET /api/transfer/:pin
@@ -293,12 +445,7 @@ func handleGetTransfer(w http.ResponseWriter, r *http.Request) {
 		files = append(files, f)
 	}
 
-	writeJSON(w, http.StatusOK, TransferResponse{
-		Pin:       pin,
-		ExpiresAt: expiresAt,
-		Files:     files,
-		Text:      textContent,
-	})
+	writeJSON(w, http.StatusOK, buildResponse(r, pin, expiresAt, files, textContent))
 }
 
 // GET /api/transfer/:pin/download/:filename
@@ -533,9 +680,103 @@ CREATE TABLE IF NOT EXISTS files (
 	return nil
 }
 
+// isBrowser is a heuristic: every major browser sends a User-Agent containing
+// "Mozilla", while curl/wget/python-requests/Go-http-client and most AI
+// fetchers do not. Used to serve docs to bots and the SPA to humans.
+func isBrowser(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("User-Agent"), "Mozilla")
+}
+
+// renderDocs returns plain-text/markdown API docs with the real host baked in,
+// so an AI agent can copy-paste a curl command verbatim.
+func renderDocs(r *http.Request) string {
+	base := baseURL(r)
+	keyMultipart := ""
+	keyRaw := ""
+	keyNote := "No API key is required."
+	if apiKey != "" {
+		keyMultipart = ` -H "X-API-Key: <your key>"`
+		keyRaw = ` -H "X-API-Key: <your key>"`
+		keyNote = `This server requires an API key. Add the header  -H "X-API-Key: <your key>"  to every upload/delete request (ask the operator for the key).`
+	}
+
+	return fmt.Sprintf(`# Shadowfax — file transfer API (for humans and robots)
+
+Upload a file and you get back a 4-digit PIN plus a share URL. Give the PIN or
+the share_url to whoever (or whatever) needs the file; it expires automatically.
+
+Base URL: %[1]s
+Auth: %[2]s
+
+## Upload (simplest — raw body, recommended for scripts/agents)
+Send the file as the raw request body. The filename goes in the URL path:
+
+    curl -T ./android-sdk.zip%[3]s %[1]s/api/upload/android-sdk.zip
+
+## Upload (multipart — supports multiple files and a text note)
+
+    curl -F "files=@./android-sdk.zip"%[4]s %[1]s/api/transfer?expiry=3600
+
+Add more "-F files=@..." for multiple files, and "-F text=..." for a note.
+
+## Optional: how long it lives
+Append ?expiry=<seconds> to either upload URL. Default 3600 (1h).
+Common values: 3600 (1h), 21600 (6h), 86400 (1d), 259200 (3d), 604800 (7d).
+
+## What you get back (HTTP 201, JSON)
+    {
+      "pin": "1234",
+      "expires_at": "2026-06-13T22:45:00Z",
+      "share_url": "%[1]s/?pin=1234",
+      "files": [{"name": "android-sdk.zip", "size": 1234,
+                 "download_url": "%[1]s/api/transfer/1234/download/android-sdk.zip"}],
+      "zip_url": "%[1]s/api/transfer/1234/zip",
+      "message": "Share PIN 1234 or the link below ..."
+    }
+
+>> Relay the "pin" and "share_url" back to the user — that is how they download the file.
+
+## Download
+    GET %[1]s/api/transfer/<pin>                      -> JSON metadata
+    GET %[1]s/api/transfer/<pin>/download/<filename>  -> the file
+    GET %[1]s/api/transfer/<pin>/zip                  -> all files as a zip
+`, base, keyNote, keyRaw, keyMultipart)
+}
+
+// handleDocs serves the API docs. GET /api returns a structured JSON listing
+// when the client prefers JSON; otherwise (and for /llms.txt) it returns text.
+func handleDocs(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api" && strings.Contains(r.Header.Get("Accept"), "application/json") {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"service":         "shadowfax",
+			"base_url":        baseURL(r),
+			"api_key_required": apiKey != "",
+			"endpoints": []map[string]string{
+				{"method": "PUT", "path": "/api/upload/{filename}", "body": "raw file bytes", "desc": "simplest upload; returns pin + share_url"},
+				{"method": "POST", "path": "/api/transfer", "body": "multipart/form-data (files, text)", "desc": "multi-file upload; returns pin + share_url"},
+				{"method": "GET", "path": "/api/transfer/{pin}", "desc": "transfer metadata"},
+				{"method": "GET", "path": "/api/transfer/{pin}/download/{filename}", "desc": "download one file"},
+				{"method": "GET", "path": "/api/transfer/{pin}/zip", "desc": "download all files as zip"},
+			},
+			"docs": baseURL(r) + "/llms.txt",
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, renderDocs(r))
+}
+
 func spaHandler(staticFS fs.FS) http.HandlerFunc {
 	fileServer := http.FileServer(http.FS(staticFS))
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Serve machine-readable docs to non-browser clients hitting the root,
+		// so a bot/agent discovers the API instead of an opaque JS bundle.
+		if r.URL.Path == "/" && !isBrowser(r) {
+			handleDocs(w, r)
+			return
+		}
+
 		// Try to serve the file directly
 		urlPath := r.URL.Path
 		if urlPath == "/" {
@@ -569,6 +810,8 @@ func main() {
 		dataDir = "./data"
 	}
 
+	apiKey = os.Getenv("API_KEY")
+
 	if err := os.MkdirAll(filepath.Join(dataDir, "files"), 0755); err != nil {
 		log.Fatalf("create data dir: %v", err)
 	}
@@ -591,13 +834,25 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
-	r.Post("/api/transfer", handleUpload)
+	// Machine-readable API docs for robots / AI agents.
+	r.Get("/llms.txt", handleDocs)
+	r.Get("/api", handleDocs)
+
+	// Write routes — gated by the optional API key.
+	r.Group(func(pr chi.Router) {
+		pr.Use(requireAPIKey)
+		pr.Post("/api/transfer", handleUpload)
+		pr.Put("/api/upload/{filename}", handleRawUpload)
+		pr.Post("/api/upload/{filename}", handleRawUpload)
+		pr.Delete("/api/transfer/{pin}", handleDeleteTransfer)
+	})
+
+	// Read routes — always open so anyone with a PIN can download.
 	r.Get("/api/transfer/{pin}", handleGetTransfer)
 	r.Get("/api/transfer/{pin}/download/{filename}", handleDownloadFile)
 	r.Get("/api/transfer/{pin}/zip", handleDownloadZip)
-	r.Delete("/api/transfer/{pin}", handleDeleteTransfer)
 
-	// SPA fallback
+	// SPA fallback (serves docs to non-browser clients at "/").
 	r.Get("/*", spaHandler(subFS))
 
 	port := os.Getenv("PORT")

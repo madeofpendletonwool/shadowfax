@@ -8,9 +8,40 @@ services:
     environment:
       - PORT=8080
       - DATA_DIR=/data
-      # Optional: require this key (header "X-API-Key: <key>") for uploads/deletes.
-      # Leave unset to keep the API fully open. Downloads are always open.
+
+      # --- encryption -----------------------------------------------------
+      # Uploads are always encrypted at rest. If ENCRYPTION_KEY is unset a key
+      # is generated into /data/.encryption-key on first boot, which means the
+      # key travels with the data. Set it here (openssl rand -base64 32) to
+      # keep the key out of the volume, and back it up: lose it and every
+      # stored transfer is unrecoverable.
+      # - ENCRYPTION_KEY=
+
+      # --- access ---------------------------------------------------------
+      # Require this key (header "X-API-Key: <key>") for uploads and deletes.
+      # Downloads are always open to anyone holding a PIN.
       # - API_KEY=change-me
+
+      # Digits in a PIN, 4-10. Each digit is 10x more guessing work.
+      # - PIN_LENGTH=6
+
+      # Set to true ONLY when behind a reverse proxy you control: it makes the
+      # app trust X-Forwarded-For/Proto/Host. Without it, rate limits key on
+      # the proxy's own address and every client shares one bucket.
+      # - TRUSTED_PROXY=true
+
+      # Comma-separated origins allowed to call the API from a browser.
+      # Unset means same-origin only, which is what the bundled UI needs.
+      # - ALLOWED_ORIGINS=https://files.example.com
+
+      # --- limits ---------------------------------------------------------
+      # - MAX_UPLOAD_BYTES=5368709120     # 5 GiB per request; 0 disables
+      # - MAX_EXPIRY_SECONDS=604800       # 7 days
+      # - RATE_LIMIT_LOOKUPS_PER_MIN=10
+      # - RATE_LIMIT_DOWNLOADS_PER_MIN=60
+      # - RATE_LIMIT_UPLOADS_PER_MIN=20
+      # - RATE_LIMIT_FAILURES=20          # wrong PINs before a lockout
+      # - RATE_LIMIT_LOCKOUT_MINUTES=15
     restart: unless-stopped
 
 volumes:

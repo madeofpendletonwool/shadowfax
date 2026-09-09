@@ -1,30 +1,41 @@
 import { useState, useRef, useEffect, KeyboardEvent, ClipboardEvent } from 'react'
 import type { TransferInfo } from '../App'
+import { useConfig } from '../config'
 
 interface Props {
   onSuccess: (info: TransferInfo) => void
 }
 
 export default function PinEntry({ onSuccess }: Props) {
-  const [digits, setDigits] = useState(['', '', '', ''])
+  const { pin_length: pinLength } = useConfig()
+  const [digits, setDigits] = useState<string[]>(() => Array(pinLength).fill(''))
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const inputRefs = useRef<(HTMLInputElement | null)[]>([])
+  const submitted = useRef(false)
 
-  // Auto-fill from URL
+  // The PIN length comes from the server, so resize once it is known.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const pin = params.get('pin')
-    if (pin && /^\d{4}$/.test(pin)) {
-      setDigits(pin.split(''))
-      // Auto-submit after brief delay
-      setTimeout(() => {
-        submitPin(pin)
-      }, 400)
-    } else {
-      inputRefs.current[0]?.focus()
+    setDigits(prev => {
+      if (prev.length === pinLength) return prev
+      const next = Array(pinLength).fill('')
+      prev.slice(0, pinLength).forEach((d, i) => { next[i] = d })
+      return next
+    })
+  }, [pinLength])
+
+  // Auto-fill from ?pin= in the share link.
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get('pin')
+    if (fromUrl && new RegExp(`^\\d{${pinLength}}$`).test(fromUrl)) {
+      if (submitted.current) return
+      submitted.current = true
+      setDigits(fromUrl.split(''))
+      const timer = setTimeout(() => submitPin(fromUrl), 400)
+      return () => clearTimeout(timer)
     }
-  }, [])
+    inputRefs.current[0]?.focus()
+  }, [pinLength])
 
   const submitPin = async (pin: string) => {
     setLoading(true)
@@ -36,32 +47,46 @@ export default function PinEntry({ onSuccess }: Props) {
         setLoading(false)
         return
       }
+      if (res.status === 429) {
+        const retry = res.headers.get('Retry-After')
+        setError(
+          retry
+            ? `Too many attempts. Try again in about ${Math.ceil(Number(retry) / 60)} minute(s).`
+            : 'Too many attempts. Please wait a moment and try again.'
+        )
+        setLoading(false)
+        return
+      }
       if (!res.ok) {
-        const data = await res.json()
+        const data = await res.json().catch(() => ({}))
         setError(data.error || 'Something went wrong')
         setLoading(false)
         return
       }
-      const data = await res.json() as TransferInfo
-      onSuccess(data)
+      onSuccess((await res.json()) as TransferInfo)
     } catch {
       setError('Network error. Please try again.')
       setLoading(false)
     }
   }
 
+  const maybeAutoSubmit = (next: string[]) => {
+    const pin = next.join('')
+    if (pin.length === pinLength && !next.includes('')) {
+      setTimeout(() => submitPin(pin), 100)
+    }
+  }
+
   const handleKeyDown = (index: number, e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Backspace') {
-      if (digits[index] !== '') {
-        const newDigits = [...digits]
-        newDigits[index] = ''
-        setDigits(newDigits)
+      const next = [...digits]
+      if (next[index] !== '') {
+        next[index] = ''
       } else if (index > 0) {
         inputRefs.current[index - 1]?.focus()
-        const newDigits = [...digits]
-        newDigits[index - 1] = ''
-        setDigits(newDigits)
+        next[index - 1] = ''
       }
+      setDigits(next)
       return
     }
 
@@ -69,105 +94,92 @@ export default function PinEntry({ onSuccess }: Props) {
       inputRefs.current[index - 1]?.focus()
       return
     }
-    if (e.key === 'ArrowRight' && index < 3) {
+    if (e.key === 'ArrowRight' && index < pinLength - 1) {
       inputRefs.current[index + 1]?.focus()
       return
     }
-
     if (e.key === 'Enter') {
       const pin = digits.join('')
-      if (pin.length === 4) submitPin(pin)
+      if (pin.length === pinLength && !digits.includes('')) submitPin(pin)
       return
     }
-
     if (!/^\d$/.test(e.key)) {
-      e.preventDefault()
+      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) e.preventDefault()
       return
     }
 
-    // Digit pressed
     e.preventDefault()
-    const newDigits = [...digits]
-    newDigits[index] = e.key
-    setDigits(newDigits)
+    const next = [...digits]
+    next[index] = e.key
+    setDigits(next)
     setError(null)
 
-    if (index < 3) {
+    if (index < pinLength - 1) {
       inputRefs.current[index + 1]?.focus()
     } else {
-      // Last digit - auto submit
-      const pin = newDigits.join('')
-      if (pin.length === 4) {
-        setTimeout(() => submitPin(pin), 100)
-      }
+      maybeAutoSubmit(next)
     }
   }
 
   const handlePaste = (e: ClipboardEvent<HTMLInputElement>) => {
     e.preventDefault()
-    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 4)
-    if (pasted.length === 0) return
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, pinLength)
+    if (!pasted) return
 
-    const newDigits = [...digits]
-    for (let i = 0; i < 4; i++) {
-      newDigits[i] = pasted[i] || ''
-    }
-    setDigits(newDigits)
+    const next = Array(pinLength).fill('')
+    for (let i = 0; i < pinLength; i++) next[i] = pasted[i] || ''
+    setDigits(next)
     setError(null)
 
-    if (pasted.length === 4) {
-      inputRefs.current[3]?.focus()
-      setTimeout(() => submitPin(pasted), 100)
+    if (pasted.length === pinLength) {
+      inputRefs.current[pinLength - 1]?.focus()
+      maybeAutoSubmit(next)
     } else {
       inputRefs.current[pasted.length]?.focus()
     }
   }
 
-  const handleClick = (index: number) => {
-    inputRefs.current[index]?.focus()
-  }
-
   const pin = digits.join('')
-  const isComplete = pin.length === 4
+  const isComplete = pin.length === pinLength && !digits.includes('')
+
+  // Keep long PINs on one line on a phone.
+  const boxSize = pinLength > 6 ? 'w-10 h-14 text-2xl' : pinLength > 4 ? 'w-12 h-16 text-3xl' : 'w-16 h-20 text-4xl'
 
   return (
     <div className="space-y-8">
       <div className="text-center space-y-2">
         <h1 className="text-3xl font-bold text-white">Receive Files</h1>
-        <p className="text-white/50">Enter the 4-digit PIN to access the files</p>
+        <p className="text-white/50">Enter the {pinLength}-digit PIN to access the files</p>
       </div>
 
       <div className="glass rounded-2xl p-8 space-y-6">
-        {/* PIN inputs */}
-        <div className="flex items-center justify-center gap-4">
+        <div className="flex items-center justify-center gap-2 sm:gap-3">
           {digits.map((digit, i) => (
             <input
               key={i}
-              ref={(el) => { inputRefs.current[i] = el }}
+              ref={el => { inputRefs.current[i] = el }}
               type="text"
               inputMode="numeric"
               pattern="\d*"
               maxLength={1}
               value={digit}
               onChange={() => {}} // handled by keyDown
-              onKeyDown={(e) => handleKeyDown(i, e)}
+              onKeyDown={e => handleKeyDown(i, e)}
               onPaste={handlePaste}
-              onClick={() => handleClick(i)}
+              onClick={() => inputRefs.current[i]?.focus()}
               disabled={loading}
-              className="pin-input"
+              className={`pin-input ${boxSize}`}
               autoComplete="off"
             />
           ))}
         </div>
 
-        {/* Error */}
         {error && (
           <div className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 text-red-400 text-sm text-center animate-fade-in">
             {error}
           </div>
         )}
 
-        {/* Submit button */}
         <button
           onClick={() => isComplete && !loading && submitPin(pin)}
           disabled={!isComplete || loading}
@@ -194,7 +206,7 @@ export default function PinEntry({ onSuccess }: Props) {
       </div>
 
       <p className="text-center text-sm text-white/30">
-        Tip: You can paste a 4-digit PIN directly into any box
+        Tip: You can paste a {pinLength}-digit PIN directly into any box
       </p>
     </div>
   )

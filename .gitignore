@@ -1,5 +1,6 @@
-# Data
+# Data (includes the auto-generated master encryption key)
 data/
+.encryption-key
 
 # Frontend build output (embedded into Go binary at build time)
 backend/static/

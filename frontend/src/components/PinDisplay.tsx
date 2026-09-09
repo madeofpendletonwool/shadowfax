@@ -66,7 +66,13 @@ export default function PinDisplay({ transfer, onSendAnother }: Props) {
   const [copied, setCopied] = useState(false)
   const [copiedLink, setCopiedLink] = useState(false)
 
-  const pin = transfer.pin.padStart(4, '0')
+  // The server already zero-pads to PIN_LENGTH; padding to 4 here would
+  // mangle any PIN longer than that.
+  const pin = transfer.pin
+
+  // Keep longer PINs on one line on a phone.
+  const boxSize =
+    pin.length > 6 ? 'w-10 h-14 text-2xl' : pin.length > 4 ? 'w-12 h-16 text-3xl' : 'w-16 h-20 text-4xl'
 
   const copyPin = async () => {
     await navigator.clipboard.writeText(pin)
@@ -92,18 +98,21 @@ export default function PinDisplay({ transfer, onSendAnother }: Props) {
         <p className="text-white/50">
           Share this PIN to let others download your files
         </p>
+        <p className="text-xs text-white/35">
+          Encrypted at rest &middot; anyone with the PIN can download, so share it privately
+        </p>
       </div>
 
       {/* PIN display */}
       <div className="glass rounded-2xl p-8 text-center space-y-4">
         <p className="text-sm text-white/40 uppercase tracking-widest font-medium">Your PIN</p>
-        <div className="flex items-center justify-center gap-3">
+        <div className="flex items-center justify-center gap-2 sm:gap-3">
           {pin.split('').map((digit, i) => (
             <div
               key={i}
-              className="w-16 h-20 flex items-center justify-center text-4xl font-mono font-bold
+              className={`${boxSize} flex items-center justify-center font-mono font-bold
                 bg-white/10 border border-white/20 rounded-xl text-white
-                shadow-lg shadow-black/20"
+                shadow-lg shadow-black/20`}
             >
               {digit}
             </div>

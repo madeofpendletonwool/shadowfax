@@ -91,7 +91,8 @@
 
 /* PIN input styling */
 .pin-input {
-  @apply w-16 h-20 text-4xl font-mono text-center bg-white/5 border-2 border-white/20 rounded-xl
+  /* Size is applied per-instance, since PIN length is a server setting. */
+  @apply font-mono text-center bg-white/5 border-2 border-white/20 rounded-xl
     text-white caret-indigo-400 outline-none
     focus:border-indigo-500 focus:bg-white/10
     transition-all duration-200;

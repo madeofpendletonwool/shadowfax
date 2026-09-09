@@ -127,7 +127,7 @@ export default function App() {
       {/* Footer */}
       <footer className="border-t border-white/5 py-6">
         <div className="max-w-4xl mx-auto px-4 text-center text-white/30 text-sm">
-          Files are automatically deleted after expiry. No account required.
+          Encrypted at rest with AES-256-GCM &middot; automatically deleted after expiry &middot; no account required.
         </div>
       </footer>
     </div>

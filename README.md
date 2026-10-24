@@ -190,6 +190,8 @@ the two worth setting on any public instance are `ENCRYPTION_KEY` and `API_KEY`.
 | `DATA_DIR` | `./data` | SQLite and encrypted uploads. Files live in `$DATA_DIR/files/<pin>/`, the database in `$DATA_DIR/shadowfax.db`. |
 | `ENCRYPTION_KEY` | *(generated)* | Master key, base64 or hex, decoding to 32 bytes. Generated into `$DATA_DIR/.encryption-key` when unset. |
 | `API_KEY` | *(unset)* | If set, uploads and deletes require it. **Downloads stay open regardless** — anyone with a PIN can fetch. |
+| `UPLOAD_PASSWORD` | *(unset)* | Password for signing in on the web UI to upload. Falls back to `API_KEY` when unset; setting either gates uploads. The browser gets a 30-day signed, HttpOnly, SameSite=Strict cookie, and changing the password signs everyone out. |
+| `RATE_LIMIT_LOGIN_FAILURES` | `5` | Wrong passwords before a login lockout (`RATE_LIMIT_LOCKOUT_MINUTES`). |
 | `PIN_LENGTH` | `6` | Digits per PIN, 4–10. Each extra digit multiplies guessing work by 10. |
 
 ### Deployment
@@ -224,6 +226,11 @@ Authorization: Bearer <your key>
 > `X-Forwarded-For` to sidestep the limiter entirely — and forge
 > `X-Forwarded-Host` to make your server hand out share links pointing at their
 > domain. Match the setting to how the server is actually reachable.
+>
+> With it on, the rate limiter keys on the **rightmost** `X-Forwarded-For` entry,
+> the address your proxy saw, so a client can't dodge it by sending its own
+> header. If several proxies are chained, the rightmost one must be the hop
+> that talks to clients.
 
 ---
 
@@ -337,8 +344,9 @@ this before sending anything sensitive.
 - Guessing is rate limited per IP (10 lookups/min by default), and 20 consecutive
   wrong PINs locks that address out for 15 minutes. A correct PIN resets the
   counter, so a recipient who mistypes once is unaffected.
-- `API_KEY` protects uploads and deletes only, compared in constant time. It does
-  not protect downloads.
+- `API_KEY` and `UPLOAD_PASSWORD` protect uploads and deletes only, compared in
+  constant time. They do not protect downloads. Cookie-authenticated writes must
+  be same-origin, on top of the cookie being SameSite=Strict.
 - CORS is same-origin by default; set `ALLOWED_ORIGINS` to opt specific sites in.
 - Uploads are capped at `MAX_UPLOAD_BYTES` (5 GiB) and rate limited, so an open
   instance cannot be trivially used to fill your disk.

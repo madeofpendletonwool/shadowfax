@@ -3,6 +3,8 @@ import DropZone from './components/DropZone'
 import PinDisplay from './components/PinDisplay'
 import PinEntry from './components/PinEntry'
 import FileList from './components/FileList'
+import Login from './components/Login'
+import { useSession } from './config'
 
 export type View = 'send' | 'receive'
 
@@ -25,6 +27,7 @@ export default function App() {
   const [view, setView] = useState<View>('send')
   const [transfer, setTransfer] = useState<TransferInfo | null>(null)
   const [receivedTransfer, setReceivedTransfer] = useState<TransferInfo | null>(null)
+  const [session, refreshSession] = useSession()
 
   // Check URL for ?pin= parameter on load
   useEffect(() => {
@@ -51,6 +54,12 @@ export default function App() {
     setReceivedTransfer(null)
     // Clear pin from URL
     window.history.replaceState({}, '', window.location.pathname)
+  }
+
+  const handleLogout = async () => {
+    await fetch('/api/logout', { method: 'POST' }).catch(() => {})
+    setTransfer(null)
+    refreshSession()
   }
 
   const switchView = (v: View) => {
@@ -96,6 +105,14 @@ export default function App() {
             >
               Receive
             </button>
+            {session.loginRequired && session.authenticated && (
+              <button
+                onClick={handleLogout}
+                className="px-3 py-1.5 rounded-lg text-sm font-medium text-white/40 hover:text-white transition-all duration-200"
+              >
+                Sign out
+              </button>
+            )}
           </nav>
         </div>
       </header>
@@ -107,8 +124,10 @@ export default function App() {
             <>
               {transfer ? (
                 <PinDisplay transfer={transfer} onSendAnother={handleSendAnother} />
+              ) : !session.checked ? null : session.authenticated ? (
+                <DropZone onUploadSuccess={handleUploadSuccess} onUnauthorized={refreshSession} />
               ) : (
-                <DropZone onUploadSuccess={handleUploadSuccess} />
+                <Login onSuccess={refreshSession} />
               )}
             </>
           )}
@@ -127,7 +146,7 @@ export default function App() {
       {/* Footer */}
       <footer className="border-t border-white/5 py-6">
         <div className="max-w-4xl mx-auto px-4 text-center text-white/30 text-sm">
-          Encrypted at rest with AES-256-GCM &middot; automatically deleted after expiry &middot; no account required.
+          Encrypted at rest with AES-256-GCM &middot; automatically deleted after expiry &middot; no account needed to receive.
         </div>
       </footer>
     </div>

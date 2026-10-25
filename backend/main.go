@@ -3,8 +3,6 @@ package main
 import (
 	"archive/zip"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -389,28 +387,6 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
 		// A PIN in a URL is a credential; keep it out of shared caches.
 		h.Set("Cache-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
-}
-
-// requireAPIKey gates write routes when API_KEY is set. Comparing SHA-256
-// digests keeps the comparison constant-time in both content and length.
-func requireAPIKey(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if apiKey == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		provided := r.Header.Get("X-API-Key")
-		if provided == "" {
-			provided = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		}
-		want := sha256.Sum256([]byte(apiKey))
-		got := sha256.Sum256([]byte(strings.TrimSpace(provided)))
-		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
-			writeError(w, http.StatusUnauthorized, "missing or invalid API key: send header 'X-API-Key: <your key>'")
-			return
-		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1140,6 +1116,9 @@ func renderDocs(r *http.Request) string {
 	base := baseURL(r)
 	keyHeader := ""
 	keyNote := "No API key is required."
+	if apiKey == "" && uploadPassword != "" {
+		keyNote = "Uploads on this server require signing in on the web UI; there is no API key for scripts."
+	}
 	if apiKey != "" {
 		keyHeader = ` -H "X-API-Key: <your key>"`
 		keyNote = `This server requires an API key. Add the header  -H "X-API-Key: <your key>"  to every upload/delete request (ask the operator for the key).`
@@ -1229,6 +1208,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		"max_upload_bytes": maxUploadBytes,
 		"max_expiry_secs":  maxExpirySecs,
 		"api_key_required": apiKey != "",
+		"login_required":   authRequired(),
 		"encrypted":        true,
 	})
 }
@@ -1282,6 +1262,7 @@ func spaHandler(staticFS fs.FS) http.HandlerFunc {
 func loadConfig() {
 	dataDir = envString("DATA_DIR", "./data")
 	apiKey = strings.TrimSpace(os.Getenv("API_KEY"))
+	uploadPassword = os.Getenv("UPLOAD_PASSWORD")
 	pinLength = envInt("PIN_LENGTH", 6, 4, 10)
 	trustProxy = envBool("TRUSTED_PROXY", false)
 	maxUploadBytes = envInt64("MAX_UPLOAD_BYTES", 5<<30) // 5 GiB, 0 disables
@@ -1306,12 +1287,13 @@ func loadConfig() {
 	lookupLimiter = newRateLimiter(lookupPerMin, failLimit, lockout)
 	downloadLimiter = newRateLimiter(downloadPerMin, failLimit, lockout)
 	uploadLimiter = newRateLimiter(uploadPerMin, 0, lockout)
+	loginLimiter = newRateLimiter(10, envInt("RATE_LIMIT_LOGIN_FAILURES", 5, 1, 1000), lockout)
 }
 
 func warnAboutConfig() {
-	if apiKey == "" {
-		log.Printf("WARNING: API_KEY is not set, so anyone who can reach this server can upload " +
-			"and delete transfers. Set API_KEY on any instance exposed to the internet.")
+	if !authRequired() {
+		log.Printf("WARNING: neither API_KEY nor UPLOAD_PASSWORD is set, so anyone who can reach " +
+			"this server can upload and delete transfers. Set one on any instance exposed to the internet.")
 	}
 	if len(allowedOrigins) == 1 && allowedOrigins[0] == "*" {
 		log.Printf("WARNING: ALLOWED_ORIGINS=* lets any website call this API from a browser.")
@@ -1340,12 +1322,15 @@ func newRouter(staticFS fs.FS) chi.Router {
 	r.Get("/llms.txt", handleDocs)
 	r.Get("/api", handleDocs)
 	r.Get("/api/config", handleConfig)
+	r.Get("/api/session", handleSession)
+	r.Post("/api/logout", handleLogout)
+	r.With(loginLimiter.middleware).Post("/api/login", handleLogin)
 
 	// Write routes: optional API key, plus a per-IP ceiling so an anonymous
 	// instance cannot be used to fill the disk.
 	r.Group(func(pr chi.Router) {
 		pr.Use(uploadLimiter.middleware)
-		pr.Use(requireAPIKey)
+		pr.Use(requireUploadAuth)
 		pr.Post("/api/transfer", handleUpload)
 		pr.Put("/api/upload/{filename}", handleRawUpload)
 		pr.Post("/api/upload/{filename}", handleRawUpload)

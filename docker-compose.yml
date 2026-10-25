@@ -22,6 +22,11 @@ services:
       # Downloads are always open to anyone holding a PIN.
       # - API_KEY=change-me
 
+      # Password for signing in on the web UI to upload. If unset, the API_KEY
+      # itself is the login password. Setting either one gates uploads.
+      # - UPLOAD_PASSWORD=
+      # - RATE_LIMIT_LOGIN_FAILURES=5      # wrong passwords before a lockout
+
       # Digits in a PIN, 4-10. Each digit is 10x more guessing work.
       # - PIN_LENGTH=6
 

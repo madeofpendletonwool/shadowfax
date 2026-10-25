@@ -30,6 +30,7 @@ func newTestServer(t *testing.T, opts ...func()) *httptest.Server {
 	dir := t.TempDir()
 	dataDir = dir
 	apiKey = ""
+	uploadPassword = ""
 	pinLength = 6
 	trustProxy = false
 	maxUploadBytes = 5 << 20
@@ -38,6 +39,7 @@ func newTestServer(t *testing.T, opts ...func()) *httptest.Server {
 	lookupLimiter = newRateLimiter(10000, 20, time.Minute)
 	downloadLimiter = newRateLimiter(10000, 20, time.Minute)
 	uploadLimiter = newRateLimiter(10000, 0, time.Minute)
+	loginLimiter = newRateLimiter(10000, 5, time.Minute)
 
 	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o700); err != nil {
 		t.Fatal(err)

@@ -3,6 +3,7 @@ import type { TransferInfo } from '../App'
 
 interface Props {
   onUploadSuccess: (info: TransferInfo) => void
+  onUnauthorized?: () => void
 }
 
 const EXPIRY_OPTIONS = [
@@ -45,7 +46,7 @@ function XIcon() {
   )
 }
 
-export default function DropZone({ onUploadSuccess }: Props) {
+export default function DropZone({ onUploadSuccess, onUnauthorized }: Props) {
   const [files, setFiles] = useState<File[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
   const [expiry, setExpiry] = useState(3600)
@@ -124,6 +125,10 @@ export default function DropZone({ onUploadSuccess }: Props) {
             const data = JSON.parse(xhr.responseText) as TransferInfo
             onUploadSuccess(data)
             resolve()
+          } else if (xhr.status === 401 && onUnauthorized) {
+            // Session expired or was revoked: send the user back to the login form
+            onUnauthorized()
+            reject(new Error('Your session expired. Please sign in again.'))
           } else {
             try {
               const err = JSON.parse(xhr.responseText)

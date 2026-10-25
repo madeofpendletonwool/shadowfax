@@ -147,11 +147,11 @@ func (rl *rateLimiter) middleware(next http.Handler) http.Handler {
 // dodge the limiter by inventing a new address on every request.
 func clientIP(r *http.Request) string {
 	if trustProxy {
+		// Rightmost entry: the one our proxy appended. Anything to its left
+		// came from the client and can be forged to dodge the limiter.
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first, _, found := strings.Cut(xff, ","); found {
-				return strings.TrimSpace(first)
-			}
-			return strings.TrimSpace(xff)
+			parts := strings.Split(xff, ",")
+			return strings.TrimSpace(parts[len(parts)-1])
 		}
 		if real := r.Header.Get("X-Real-IP"); real != "" {
 			return strings.TrimSpace(real)

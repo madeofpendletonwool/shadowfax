@@ -4,6 +4,7 @@ import type { TransferInfo } from '../App'
 interface Props {
   transfer: TransferInfo
   onSendAnother: () => void
+  onManage?: () => void
 }
 
 function formatBytes(bytes: number): string {
@@ -62,7 +63,7 @@ function FileIcon() {
   )
 }
 
-export default function PinDisplay({ transfer, onSendAnother }: Props) {
+export default function PinDisplay({ transfer, onSendAnother, onManage }: Props) {
   const [copied, setCopied] = useState(false)
   const [copiedLink, setCopiedLink] = useState(false)
 
@@ -185,6 +186,18 @@ export default function PinDisplay({ transfer, onSendAnother }: Props) {
             </pre>
           </div>
         </div>
+      )}
+
+      {onManage && (
+        <button
+          onClick={onManage}
+          className="w-full py-3 rounded-2xl font-medium text-sm text-indigo-300
+            hover:text-white bg-indigo-500/10 hover:bg-indigo-500/20
+            border border-indigo-500/20 hover:border-indigo-500/40
+            transition-all duration-200"
+        >
+          Manage this upload &mdash; extend, add files, see downloads
+        </button>
       )}
 
       {/* Send another */}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -108,12 +109,33 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, value string, maxA
 	})
 }
 
+// How a write request proved itself, recorded against the transfer it creates.
+const (
+	authNone    = "none"
+	authAPIKey  = "api_key"
+	authSession = "session"
+)
+
+type authCtxKey struct{}
+
+func withAuthMethod(r *http.Request, method string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), authCtxKey{}, method))
+}
+
+// authMethodOf reports how requireUploadAuth let this request through.
+func authMethodOf(r *http.Request) string {
+	if m, ok := r.Context().Value(authCtxKey{}).(string); ok {
+		return m
+	}
+	return authNone
+}
+
 // requireUploadAuth gates write routes: a valid X-API-Key header or a
 // same-origin request carrying a valid session cookie.
 func requireUploadAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !authRequired() {
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, withAuthMethod(r, authNone))
 			return
 		}
 		if apiKey != "" {
@@ -122,7 +144,7 @@ func requireUploadAuth(next http.Handler) http.Handler {
 				provided = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			}
 			if provided != "" && secretsEqual(strings.TrimSpace(provided), apiKey) {
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, withAuthMethod(r, authAPIKey))
 				return
 			}
 		}
@@ -131,11 +153,27 @@ func requireUploadAuth(next http.Handler) http.Handler {
 				writeError(w, http.StatusForbidden, "cross-origin request refused")
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, withAuthMethod(r, authSession))
 			return
 		}
 		writeError(w, http.StatusUnauthorized,
 			"login required: sign in on the web UI, or send header 'X-API-Key: <your key>'")
+	})
+}
+
+// requireManageAuth gates the uploads dashboard. It is stricter than the upload
+// gate: on an open instance anyone may upload, but a listing of every live
+// transfer would hand out every PIN, so management only exists once a
+// password or API key is configured.
+func requireManageAuth(next http.Handler) http.Handler {
+	gated := requireUploadAuth(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !authRequired() {
+			writeError(w, http.StatusForbidden,
+				"upload management is disabled: set UPLOAD_PASSWORD or API_KEY to enable it")
+			return
+		}
+		gated.ServeHTTP(w, r)
 	})
 }
 
@@ -178,7 +216,8 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 // GET /api/session tells the UI whether to show the uploader or the login form.
 func handleSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"login_required": authRequired(),
-		"authenticated":  !authRequired() || validSession(r),
+		"login_required":     authRequired(),
+		"authenticated":      !authRequired() || validSession(r),
+		"management_enabled": authRequired(),
 	})
 }

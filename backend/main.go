@@ -316,16 +316,18 @@ func generatePIN(length int) (string, error) {
 // Generating the PIN in the same statement that claims it closes the race the
 // old SELECT-then-INSERT had, where two concurrent uploads could pick the same
 // PIN and the loser died with a 500 on the unique index.
-func insertFileset(tx *sql.Tx, now, expiresAt time.Time, textBlob, textKey []byte) (int64, string, error) {
+func insertFileset(tx *sql.Tx, now, expiresAt time.Time, textBlob, textKey []byte, meta uploadMeta) (int64, string, error) {
 	for attempt := 0; attempt < 100; attempt++ {
 		pin, err := generatePIN(pinLength)
 		if err != nil {
 			return 0, "", err
 		}
 		res, err := tx.Exec(
-			`INSERT INTO filesets (pin, created_at, expires_at, text_blob, text_key)
-			 VALUES (?, ?, ?, ?, ?) ON CONFLICT(pin) DO NOTHING`,
+			`INSERT INTO filesets (pin, created_at, expires_at, text_blob, text_key,
+			   upload_method, auth_method, uploader_ip, uploader_agent, requested_expiry_secs)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pin) DO NOTHING`,
 			pin, now, expiresAt, textBlob, textKey,
+			meta.method, meta.auth, meta.ip, meta.agent, meta.expirySecs,
 		)
 		if err != nil {
 			return 0, "", err
@@ -365,7 +367,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 			if allowed != "*" {
 				w.Header().Add("Vary", "Origin")
 			}
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 			w.Header().Set("Access-Control-Max-Age", "600")
 		}
@@ -391,7 +393,7 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-var pinInPath = regexp.MustCompile(`(/api/transfer/)[^/?]+`)
+var pinInPath = regexp.MustCompile(`(/api/(?:manage/)?transfers?/)[^/?]+`)
 
 // redactPIN keeps PINs out of the access log. A PIN is the only credential
 // guarding a transfer, so logging it verbatim would leak every upload to
@@ -496,7 +498,7 @@ func stageDir() (string, error) {
 // The transaction opens only once every byte is already on disk. Holding it
 // open across the upload itself would pin the single SQLite connection for the
 // whole transfer, stalling every other request behind one slow uploader.
-func commitTransfer(staging string, files []pendingFile, text string, now, expiresAt time.Time) (string, error) {
+func commitTransfer(staging string, files []pendingFile, text string, now, expiresAt time.Time, meta uploadMeta) (string, error) {
 	var textBlob, textKey []byte
 	if text != "" {
 		var err error
@@ -511,7 +513,7 @@ func commitTransfer(staging string, files []pendingFile, text string, now, expir
 	}
 	defer tx.Rollback()
 
-	filesetID, pin, err := insertFileset(tx, now, expiresAt, textBlob, textKey)
+	filesetID, pin, err := insertFileset(tx, now, expiresAt, textBlob, textKey, meta)
 	if err != nil {
 		return "", err
 	}
@@ -526,9 +528,9 @@ func commitTransfer(staging string, files []pendingFile, text string, now, expir
 
 	for _, f := range files {
 		if _, err := tx.Exec(
-			`INSERT INTO files (fileset_id, original_name, stored_name, size, wrapped_key)
-			 VALUES (?, ?, ?, ?, ?)`,
-			filesetID, f.displayName, f.storedName, f.size, f.wrappedKey,
+			`INSERT INTO files (fileset_id, original_name, stored_name, size, wrapped_key, added_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			filesetID, f.displayName, f.storedName, f.size, f.wrappedKey, now,
 		); err != nil {
 			os.RemoveAll(dest)
 			return "", err
@@ -538,6 +540,7 @@ func commitTransfer(staging string, files []pendingFile, text string, now, expir
 		os.RemoveAll(dest)
 		return "", err
 	}
+	recordEvent(filesetID, eventCreated, meta.summary(len(files), text != ""), meta.ip, meta.agent)
 	return pin, nil
 }
 
@@ -584,7 +587,40 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	mr := multipart.NewReader(r.Body, boundary)
+	pending, textContent, ok := readMultipartInto(w, multipart.NewReader(r.Body, boundary), staging)
+	if !ok {
+		return
+	}
+
+	if len(pending) == 0 && textContent == "" {
+		writeError(w, http.StatusBadRequest, "no files or text provided")
+		return
+	}
+
+	method := "multipart"
+	if auth := authMethodOf(r); auth == authSession || (auth == authNone && isBrowser(r)) {
+		method = "web"
+	}
+	meta := newUploadMeta(r, method, int64(expiresAt.Sub(now).Seconds()))
+	pin, err := commitTransfer(staging, pending, textContent, now, expiresAt, meta)
+	if err != nil {
+		log.Printf("commit transfer error: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not create transfer")
+		return
+	}
+	done = true
+
+	files := make([]FileInfo, len(pending))
+	for i, f := range pending {
+		files[i] = FileInfo{Name: f.displayName, Size: f.size}
+	}
+	writeJSON(w, http.StatusCreated, buildResponse(r, pin, expiresAt, files, textContent))
+}
+
+// readMultipartInto encrypts every file part into staging and returns the
+// staged files plus any "text" field. On failure it has already written the
+// error response.
+func readMultipartInto(w http.ResponseWriter, mr *multipart.Reader, staging string) ([]pendingFile, string, bool) {
 	var pending []pendingFile
 	var textContent string
 
@@ -596,11 +632,11 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if isTooLarge(err) {
 				writeTooLarge(w)
-				return
+				return nil, "", false
 			}
 			log.Printf("multipart error: %v", err)
 			writeError(w, http.StatusBadRequest, "multipart read error")
-			return
+			return nil, "", false
 		}
 
 		if part.FormName() == "text" && part.FileName() == "" {
@@ -608,7 +644,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			part.Close()
 			if err != nil {
 				writeError(w, http.StatusBadRequest, "could not read text field")
-				return
+				return nil, "", false
 			}
 			textContent = string(buf)
 			continue
@@ -625,33 +661,15 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if isTooLarge(err) {
 				writeTooLarge(w)
-				return
+				return nil, "", false
 			}
 			log.Printf("store file error: %v", err)
 			writeError(w, http.StatusInternalServerError, "could not save file")
-			return
+			return nil, "", false
 		}
 		pending = append(pending, pendingFile{displayName, storedName, written, wrapped})
 	}
-
-	if len(pending) == 0 && textContent == "" {
-		writeError(w, http.StatusBadRequest, "no files or text provided")
-		return
-	}
-
-	pin, err := commitTransfer(staging, pending, textContent, now, expiresAt)
-	if err != nil {
-		log.Printf("commit transfer error: %v", err)
-		writeError(w, http.StatusInternalServerError, "could not create transfer")
-		return
-	}
-	done = true
-
-	files := make([]FileInfo, len(pending))
-	for i, f := range pending {
-		files[i] = FileInfo{Name: f.displayName, Size: f.size}
-	}
-	writeJSON(w, http.StatusCreated, buildResponse(r, pin, expiresAt, files, textContent))
+	return pending, textContent, true
 }
 
 func sealText(text string) (blob, wrapped []byte, err error) {
@@ -722,7 +740,8 @@ func handleRawUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pending := []pendingFile{{displayName, storedName, written, wrapped}}
-	pin, err := commitTransfer(staging, pending, "", now, expiresAt)
+	meta := newUploadMeta(r, "raw", int64(expiresAt.Sub(now).Seconds()))
+	pin, err := commitTransfer(staging, pending, "", now, expiresAt, meta)
 	if err != nil {
 		log.Printf("commit transfer error: %v", err)
 		writeError(w, http.StatusInternalServerError, "could not create transfer")
@@ -811,11 +830,13 @@ func handleGetTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 
+	recordEvent(filesetID, eventOpened, "", clientIP(r), r.UserAgent())
 	writeJSON(w, http.StatusOK,
 		buildResponse(r, chi.URLParam(r, "pin"), expiresAt, files, readText(filesetID)))
 }
 
 type storedFile struct {
+	id          int64
 	storedName  string
 	displayName string
 	size        int64
@@ -832,8 +853,8 @@ func findFile(filesetID int64, rawName string) (storedFile, error) {
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(candidates)), ",")
 	query := fmt.Sprintf(
-		`SELECT stored_name, original_name, size, wrapped_key FROM files
-		 WHERE fileset_id = ? AND (original_name IN (%s) OR stored_name IN (%s)) LIMIT 1`,
+		`SELECT id, stored_name, original_name, size, wrapped_key FROM files
+		 WHERE fileset_id = ? AND (original_name IN (%s) OR stored_name IN (%s)) ORDER BY id LIMIT 1`,
 		placeholders, placeholders)
 
 	args := make([]any, 0, 1+2*len(candidates))
@@ -845,7 +866,7 @@ func findFile(filesetID int64, rawName string) (storedFile, error) {
 	}
 
 	var sf storedFile
-	err := db.QueryRow(query, args...).Scan(&sf.storedName, &sf.displayName, &sf.size, &sf.wrappedKey)
+	err := db.QueryRow(query, args...).Scan(&sf.id, &sf.storedName, &sf.displayName, &sf.size, &sf.wrappedKey)
 	return sf, err
 }
 
@@ -887,23 +908,31 @@ func handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	serveFile(w, r, pin, filesetID, sf, false)
+}
+
+// serveFile streams one decrypted file. Owner downloads from the dashboard are
+// logged but do not count towards the transfer's download totals.
+func serveFile(w http.ResponseWriter, r *http.Request, pin string, filesetID int64, sf storedFile, owner bool) {
 	closer, copyTo, err := openStored(pin, sf)
 	if err != nil {
 		log.Printf("open stored file error: %v", err)
 		writeError(w, http.StatusNotFound, "file not found on disk")
 		return
 	}
-	defer closer.Close()
 
 	// size is the plaintext length, which is what the client will receive.
 	w.Header().Set("Content-Disposition", contentDisposition(sf.displayName))
 	w.Header().Set("Content-Length", strconv.FormatInt(sf.size, 10))
 	w.Header().Set("Content-Type", "application/octet-stream")
 
-	if err := copyTo(w); err != nil {
+	err = copyTo(w)
+	closer.Close()
+	if err != nil {
 		// Headers are already sent, so this can only be logged.
 		log.Printf("download stream error (pin ***, file %q): %v", sf.storedName, err)
 	}
+	recordDownload(r, filesetID, []int64{sf.id}, sf.displayName, err == nil, owner)
 }
 
 // GET /api/transfer/:pin/zip
@@ -914,28 +943,46 @@ func handleDownloadZip(w http.ResponseWriter, r *http.Request) {
 	}
 	pin := chi.URLParam(r, "pin")
 
-	rows, err := db.Query(
-		`SELECT stored_name, original_name, size, wrapped_key FROM files WHERE fileset_id = ? ORDER BY id`,
-		filesetID)
+	entries, err := listStoredFiles(filesetID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	serveZip(w, r, pin, filesetID, entries, false)
+}
+
+func listStoredFiles(filesetID int64) ([]storedFile, error) {
+	rows, err := db.Query(
+		`SELECT id, stored_name, original_name, size, wrapped_key FROM files WHERE fileset_id = ? ORDER BY id`,
+		filesetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() // released before streaming: the pool is single-connection
 	var entries []storedFile
 	for rows.Next() {
 		var sf storedFile
-		if err := rows.Scan(&sf.storedName, &sf.displayName, &sf.size, &sf.wrappedKey); err != nil {
+		if err := rows.Scan(&sf.id, &sf.storedName, &sf.displayName, &sf.size, &sf.wrappedKey); err != nil {
 			continue
 		}
 		entries = append(entries, sf)
 	}
-	rows.Close() // released before streaming: the pool is single-connection
+	return entries, rows.Err()
+}
 
+func serveZip(w http.ResponseWriter, r *http.Request, pin string, filesetID int64, entries []storedFile, owner bool) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", contentDisposition(fmt.Sprintf("shadowfax-%s.zip", pin)))
 
 	zw := zip.NewWriter(w)
-	defer zw.Close()
+	complete := true
+	var ids []int64
+	defer func() {
+		if err := zw.Close(); err != nil {
+			complete = false
+		}
+		recordDownload(r, filesetID, ids, fmt.Sprintf("zip of %d file(s)", len(ids)), complete, owner)
+	}()
 
 	used := make(map[string]bool)
 	for _, sf := range entries {
@@ -957,12 +1004,15 @@ func handleDownloadZip(w http.ResponseWriter, r *http.Request) {
 		fw, err := zw.Create(name)
 		if err != nil {
 			closer.Close()
+			complete = false
 			continue
 		}
 		if err := copyTo(fw); err != nil {
 			log.Printf("zip: stream error for %q: %v", sf.storedName, err)
+			complete = false
 		}
 		closer.Close()
+		ids = append(ids, sf.id)
 	}
 }
 
@@ -1080,6 +1130,17 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS idx_files_fileset ON files(fileset_id);
 CREATE INDEX IF NOT EXISTS idx_filesets_expires ON filesets(expires_at);
+CREATE TABLE IF NOT EXISTS transfer_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fileset_id INTEGER NOT NULL,
+  at DATETIME NOT NULL,
+  kind TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  ip TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY (fileset_id) REFERENCES filesets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_events_fileset ON transfer_events(fileset_id, id);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
@@ -1092,6 +1153,18 @@ CREATE INDEX IF NOT EXISTS idx_filesets_expires ON filesets(expires_at);
 		`ALTER TABLE filesets ADD COLUMN text_blob BLOB`,
 		`ALTER TABLE filesets ADD COLUMN text_key BLOB`,
 		`ALTER TABLE files ADD COLUMN wrapped_key BLOB`,
+		// Upload management: provenance, owner edits, and download stats.
+		`ALTER TABLE filesets ADD COLUMN label TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE filesets ADD COLUMN upload_method TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE filesets ADD COLUMN auth_method TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE filesets ADD COLUMN uploader_ip TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE filesets ADD COLUMN uploader_agent TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE filesets ADD COLUMN requested_expiry_secs INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE filesets ADD COLUMN extend_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE filesets ADD COLUMN download_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE filesets ADD COLUMN last_download_at DATETIME`,
+		`ALTER TABLE files ADD COLUMN added_at DATETIME`,
+		`ALTER TABLE files ADD COLUMN download_count INTEGER NOT NULL DEFAULT 0`,
 	} {
 		db.Exec(stmt)
 	}
@@ -1171,6 +1244,16 @@ Common values: 3600 (1h), 21600 (6h), 86400 (1d), 259200 (3d), 604800 (7d).
 
 Lookups are rate limited per IP, and repeatedly guessing wrong PINs will lock
 your address out for a while. Use the PIN you were given.
+
+## Manage uploads (needs the API key or a signed-in session)
+    GET    %[1]s/api/manage/transfers              -> every live transfer + stats
+    GET    %[1]s/api/manage/transfers/<pin>        -> details, note, activity log
+    PATCH  %[1]s/api/manage/transfers/<pin>        {"extend_secs": 86400} | {"expires_in": 3600}
+                                                   | {"expires_at": "<RFC3339>"} | {"label": "..."} | {"text": "..."}
+    POST   %[1]s/api/manage/transfers/<pin>/rotate-pin   -> new PIN, old one revoked
+    POST   %[1]s/api/manage/transfers/<pin>/files  (multipart "files") -> add files
+    DELETE %[1]s/api/manage/transfers/<pin>/files/<id>
+    DELETE %[1]s/api/manage/transfers/<pin>
 `, base, keyNote, keyHeader, maxExpirySecs, pinLength, strings.Repeat("1", pinLength))
 }
 
@@ -1190,6 +1273,13 @@ func handleDocs(w http.ResponseWriter, r *http.Request) {
 				{"method": "GET", "path": "/api/transfer/{pin}", "desc": "transfer metadata"},
 				{"method": "GET", "path": "/api/transfer/{pin}/download/{filename}", "desc": "download one file"},
 				{"method": "GET", "path": "/api/transfer/{pin}/zip", "desc": "download all files as zip"},
+				{"method": "GET", "path": "/api/manage/transfers", "desc": "auth: list every live transfer with stats"},
+				{"method": "GET", "path": "/api/manage/transfers/{pin}", "desc": "auth: transfer details and activity log"},
+				{"method": "PATCH", "path": "/api/manage/transfers/{pin}", "body": "JSON: label, text, extend_secs | expires_in | expires_at", "desc": "auth: edit or extend"},
+				{"method": "POST", "path": "/api/manage/transfers/{pin}/rotate-pin", "desc": "auth: issue a new PIN"},
+				{"method": "POST", "path": "/api/manage/transfers/{pin}/files", "body": "multipart/form-data (files)", "desc": "auth: add files"},
+				{"method": "DELETE", "path": "/api/manage/transfers/{pin}/files/{id}", "desc": "auth: remove one file"},
+				{"method": "DELETE", "path": "/api/manage/transfers/{pin}", "desc": "auth: delete transfer"},
 			},
 			"docs": baseURL(r) + "/llms.txt",
 		})
@@ -1349,6 +1439,20 @@ func newRouter(staticFS fs.FS) chi.Router {
 		// otherwise fail to route at all.
 		pr.Get("/api/transfer/{pin}/download/*", handleDownloadFile)
 		pr.Get("/api/transfer/{pin}/zip", handleDownloadZip)
+	})
+
+	// Upload management: every live transfer, for whoever holds the login.
+	r.Route("/api/manage", func(mr chi.Router) {
+		mr.Use(requireManageAuth)
+		mr.Get("/transfers", handleManageList)
+		mr.Get("/transfers/{pin}", handleManageGet)
+		mr.Patch("/transfers/{pin}", handleManageUpdate)
+		mr.Delete("/transfers/{pin}", handleDeleteTransfer)
+		mr.Post("/transfers/{pin}/rotate-pin", handleManageRotatePIN)
+		mr.Get("/transfers/{pin}/zip", handleManageZip)
+		mr.Get("/transfers/{pin}/files/{fileID}", handleManageDownloadFile)
+		mr.Delete("/transfers/{pin}/files/{fileID}", handleManageDeleteFile)
+		mr.With(uploadLimiter.middleware).Post("/transfers/{pin}/files", handleManageAddFiles)
 	})
 
 	r.Get("/*", spaHandler(staticFS))

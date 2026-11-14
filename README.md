@@ -300,10 +300,45 @@ what you receive.
 | `GET` | `/api/transfer/{pin}/download/{filename}` | open | Download a single file. |
 | `GET` | `/api/transfer/{pin}/zip` | open | Download every file as a zip, streamed. |
 | `DELETE` | `/api/transfer/{pin}` | API key | Delete a transfer immediately. |
+| `GET` | `/api/manage/transfers` | login | Every live transfer with provenance, files, and download stats. |
+| `GET` | `/api/manage/transfers/{pin}` | login | One transfer in full: decrypted note, on-disk sizes, activity log. |
+| `PATCH` | `/api/manage/transfers/{pin}` | login | Change `label`, `text`, or expiry (`extend_secs`, `expires_in`, or `expires_at`). |
+| `POST` | `/api/manage/transfers/{pin}/rotate-pin` | login | Issue a new PIN; the old PIN and share link stop working. |
+| `POST` | `/api/manage/transfers/{pin}/files` | login | Add files (multipart `files`) to an existing transfer. |
+| `GET` | `/api/manage/transfers/{pin}/files/{id}` | login | Owner download; logged, but not counted as a recipient download. |
+| `DELETE` | `/api/manage/transfers/{pin}/files/{id}` | login | Remove one file. Removing the last one deletes the transfer. |
+| `GET` | `/api/manage/transfers/{pin}/zip` | login | Owner zip download. |
+| `DELETE` | `/api/manage/transfers/{pin}` | login | Delete a transfer immediately. |
 | `GET` | `/llms.txt` | open | Plain-text API docs. |
 | `GET` | `/api` | open | JSON endpoint listing (with `Accept: application/json`). |
 | `GET` | `/api/config` | open | PIN length and limits, so the UI matches the server. |
 | `GET` | `/healthz` | open | Liveness probe. |
+
+"login" means a signed-in browser session or the API key.
+
+### Managing uploads
+
+Signed-in users get an **Uploads** tab that works like a small drive. It lists
+every live transfer and supports search, sorting, filters, and bulk extend or
+delete. Each transfer has a detail page where you can:
+
+- **Extend or shorten** its life: +1h/+6h/+1d/+3d, extend to the maximum, or
+  set an exact time. Each change is capped at `MAX_EXPIRY_SECONDS` from *now*,
+  so you can keep a transfer alive for as long as you keep extending it.
+- **Rename** it, and add, edit, or remove its note. A new note is encrypted
+  under a fresh key.
+- **Download** a single file or a zip, add more files, delete single files,
+  and copy each file's public link.
+- **Rotate the PIN** to revoke a share link that has leaked.
+- See **how it was uploaded** (web UI, multipart API, or raw API), how the
+  request authenticated, the client, the source IP, and the expiry originally
+  requested.
+- See **activity**: PIN lookups, completed and interrupted downloads, and every
+  owner change, each with a timestamp, IP, and client.
+
+Login is a single shared password or key, so "your uploads" means every upload
+on the server. The management API is **disabled when neither `UPLOAD_PASSWORD`
+nor `API_KEY` is set**, because on an open instance it would hand out every PIN.
 
 Expired or unknown PINs return `404`. Read endpoints are rate limited per IP and
 return `429` with a `Retry-After` header once you exceed the limit; repeated
@@ -352,6 +387,9 @@ this before sending anything sensitive.
   instance cannot be trivially used to fill your disk.
 - PINs are redacted from the access log, so reading the logs does not hand
   someone every live transfer.
+- Each transfer keeps an activity log for its owner: who uploaded it, every PIN
+  lookup, and every download, with IP address and User-Agent. The log is stored
+  in the transfer's database row and deleted with it on expiry.
 
 ### Deletion
 

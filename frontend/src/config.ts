@@ -50,6 +50,8 @@ export interface Session {
   checked: boolean
   loginRequired: boolean
   authenticated: boolean
+  // Upload management only exists when a login is configured.
+  managementEnabled: boolean
 }
 
 // Whether this browser may upload. Re-run refresh() after login, logout, or a 401.
@@ -58,6 +60,7 @@ export function useSession(): [Session, () => void] {
     checked: false,
     loginRequired: false,
     authenticated: false,
+    managementEnabled: false,
   })
   const [tick, setTick] = useState(0)
   useEffect(() => {
@@ -65,9 +68,14 @@ export function useSession(): [Session, () => void] {
     fetch('/api/session')
       .then(res => (res.ok ? res.json() : { login_required: false, authenticated: true }))
       .catch(() => ({ login_required: false, authenticated: true }))
-      .then((s: { login_required: boolean; authenticated: boolean }) => {
+      .then((s: { login_required: boolean; authenticated: boolean; management_enabled?: boolean }) => {
         if (active) {
-          setSession({ checked: true, loginRequired: s.login_required, authenticated: s.authenticated })
+          setSession({
+            checked: true,
+            loginRequired: s.login_required,
+            authenticated: s.authenticated,
+            managementEnabled: !!s.management_enabled,
+          })
         }
       })
     return () => {

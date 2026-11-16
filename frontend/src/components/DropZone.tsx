@@ -1,17 +1,21 @@
 import { useState, useRef, useCallback, DragEvent, ChangeEvent } from 'react'
 import type { TransferInfo } from '../App'
+import { useConfig } from '../config'
 
 interface Props {
   onUploadSuccess: (info: TransferInfo) => void
   onUnauthorized?: () => void
 }
 
-const EXPIRY_OPTIONS = [
+type Expiry = number | 'never'
+
+const EXPIRY_OPTIONS: { label: string; value: Expiry }[] = [
   { label: '1 hour', value: 3600 },
   { label: '6 hours', value: 21600 },
   { label: '24 hours', value: 86400 },
   { label: '3 days', value: 259200 },
   { label: '7 days', value: 604800 },
+  { label: 'Never', value: 'never' },
 ]
 
 function formatBytes(bytes: number): string {
@@ -49,7 +53,9 @@ function XIcon() {
 export default function DropZone({ onUploadSuccess, onUnauthorized }: Props) {
   const [files, setFiles] = useState<File[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
-  const [expiry, setExpiry] = useState(3600)
+  const { allow_permanent } = useConfig()
+  const [expiry, setExpiry] = useState<Expiry>(3600)
+  const expiryOptions = EXPIRY_OPTIONS.filter(o => o.value !== 'never' || allow_permanent)
   const [uploading, setUploading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -255,7 +261,7 @@ export default function DropZone({ onUploadSuccess, onUnauthorized }: Props) {
       <div className="glass rounded-2xl p-4 space-y-3">
         <p className="text-sm font-medium text-white/60">Expires in</p>
         <div className="flex flex-wrap gap-2">
-          {EXPIRY_OPTIONS.map(opt => (
+          {expiryOptions.map(opt => (
             <button
               key={opt.value}
               onClick={() => setExpiry(opt.value)}
@@ -273,6 +279,11 @@ export default function DropZone({ onUploadSuccess, onUnauthorized }: Props) {
             </button>
           ))}
         </div>
+        {expiry === 'never' && (
+          <p className="text-xs text-white/40">
+            Kept until you delete it from Uploads. Anyone with the PIN can download it for as long as it exists.
+          </p>
+        )}
       </div>
 
       {/* Error */}

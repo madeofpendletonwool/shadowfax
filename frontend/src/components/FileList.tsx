@@ -86,16 +86,18 @@ function CheckIcon() {
 }
 
 export default function FileList({ transfer, onTransferAnother }: Props) {
-  const [countdown, setCountdown] = useState(() => formatCountdown(transfer.expires_at))
+  const expiresAt = transfer.expires_at
+  const [countdown, setCountdown] = useState(() => (expiresAt ? formatCountdown(expiresAt) : ''))
   const [downloadingAll, setDownloadingAll] = useState(false)
   const [copiedText, setCopiedText] = useState(false)
 
   useEffect(() => {
+    if (!expiresAt) return
     const interval = setInterval(() => {
-      setCountdown(formatCountdown(transfer.expires_at))
+      setCountdown(formatCountdown(expiresAt))
     }, 1000)
     return () => clearInterval(interval)
-  }, [transfer.expires_at])
+  }, [expiresAt])
 
   const downloadFile = (filename: string) => {
     const url = `/api/transfer/${transfer.pin}/download/${encodeURIComponent(filename)}`
@@ -119,7 +121,7 @@ export default function FileList({ transfer, onTransferAnother }: Props) {
     setTimeout(() => setDownloadingAll(false), 2000)
   }
 
-  const isExpired = new Date(transfer.expires_at) <= new Date()
+  const isExpired = !!expiresAt && new Date(expiresAt) <= new Date()
   const totalSize = transfer.files.reduce((acc, f) => acc + f.size, 0)
 
   const copyText = async () => {
@@ -156,8 +158,10 @@ export default function FileList({ transfer, onTransferAnother }: Props) {
         <p className="text-sm text-white/60">
           {isExpired ? (
             <span className="text-red-400 font-medium">This transfer has expired</span>
-          ) : (
+          ) : expiresAt ? (
             <>Expires in <span className="text-white font-semibold font-mono">{countdown}</span></>
+          ) : (
+            <span className="text-white font-semibold">Does not expire</span>
           )}
         </p>
       </div>

@@ -12,6 +12,7 @@ import {
   UPLOAD_METHODS,
 } from '../format'
 import { btn, Card, ConfirmButton, ExpiryBar, expiryTone, Icons, useCopy, useNow } from './ui'
+import { useConfig } from '../config'
 
 interface Props {
   pin: string
@@ -90,6 +91,7 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
   const fileInput = useRef<HTMLInputElement>(null)
   const [copied, copy] = useCopy()
   const now = useNow()
+  const { allow_permanent } = useConfig()
 
   const fail = useCallback(
     (err: unknown) => {
@@ -116,7 +118,7 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
 
   // Expired while open: go back rather than showing a dead page.
   useEffect(() => {
-    if (t && new Date(t.expires_at).getTime() <= now) onDeleted()
+    if (t?.expires_at && new Date(t.expires_at).getTime() <= now) onDeleted()
   }, [t, now, onDeleted])
 
   const run = async (fn: () => Promise<ManagedTransfer | void>, message?: string) => {
@@ -184,10 +186,12 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
     )
   }
 
-  const left = new Date(t.expires_at).getTime() - now
+  const permanent = !t.expires_at
+  const expiresMs = t.expires_at ? new Date(t.expires_at).getTime() : Infinity
+  const left = expiresMs - now
   const maxLeft = new Date(t.max_expires_at).getTime()
-  const atMax = maxLeft - new Date(t.expires_at).getTime() < 60e3
-  const lifetime = (new Date(t.expires_at).getTime() - new Date(t.created_at).getTime()) / 1000
+  const atMax = !permanent && maxLeft - expiresMs < 60e3
+  const lifetime = permanent ? 0 : (expiresMs - new Date(t.created_at).getTime()) / 1000
   const method = UPLOAD_METHODS[t.upload.method]
   const events = t.events ?? []
   const shownEvents = showAllEvents ? events : events.slice(0, 8)
@@ -286,9 +290,11 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
           <Card title="Time remaining">
             <div className="p-4 space-y-4">
               <div className="flex items-end justify-between gap-3">
-                <p className={`text-3xl font-semibold font-mono tabular-nums ${expiryTone(left)}`}>{formatRemaining(left)}</p>
+                <p className={`text-3xl font-semibold font-mono tabular-nums ${expiryTone(left)}`}>
+                  {permanent ? 'Never expires' : formatRemaining(left)}
+                </p>
                 <p className="text-xs text-white/40 text-right">
-                  expires {formatDateTime(t.expires_at)}
+                  {t.expires_at ? `expires ${formatDateTime(t.expires_at)}` : 'kept until deleted'}
                   <br />
                   {t.extend_count > 0 ? `extended ${t.extend_count}×` : 'never extended'}
                 </p>
@@ -300,7 +306,9 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
                     key={o.secs}
                     className={btn.ghost}
                     disabled={busy || atMax}
-                    onClick={() => setExpiry({ extend_secs: o.secs }, `Extended ${o.label.slice(1)}`)}
+                    onClick={() =>
+                      setExpiry({ extend_secs: o.secs }, permanent ? `Now expires in ${o.label.slice(1)}` : `Extended ${o.label.slice(1)}`)
+                    }
                   >
                     {o.label}
                   </button>
@@ -313,6 +321,16 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
                 >
                   Max
                 </button>
+                {allow_permanent && !permanent && (
+                  <button
+                    className={btn.ghost}
+                    disabled={busy}
+                    onClick={() => setExpiry({ never_expires: true }, 'This transfer will never expire')}
+                    title="Keep it until you delete it"
+                  >
+                    Never expire
+                  </button>
+                )}
               </div>
               <form
                 className="flex flex-wrap gap-2 items-center"
@@ -334,6 +352,7 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
                 <button type="submit" className={btn.ghost} disabled={!customExpiry || busy}>Set exact time</button>
               </form>
               <p className="text-xs text-white/30">
+                {permanent && 'Pick a time above to give this transfer an expiry again. '}
                 Earlier times shorten the transfer. The server caps expiry at {formatDuration((maxLeft - now) / 1000)} from now
                 {atMax && ' — this transfer is already there'}.
               </p>
@@ -494,8 +513,10 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
               <Row label="Client" title={t.upload.user_agent}>{t.upload.user_agent ? describeAgent(t.upload.user_agent) : '—'}</Row>
               <Row label="From IP"><span className="font-mono text-xs">{t.upload.ip || '—'}</span></Row>
               <Row label="Uploaded">{formatDateTime(t.created_at)}</Row>
-              <Row label="Asked to keep">{t.upload.requested_expiry_secs ? formatDuration(t.upload.requested_expiry_secs) : '—'}</Row>
-              <Row label="Total lifetime">{formatDuration(lifetime)}</Row>
+              <Row label="Asked to keep">
+                {t.upload.requested_expiry_secs < 0 ? 'Forever' : t.upload.requested_expiry_secs ? formatDuration(t.upload.requested_expiry_secs) : '—'}
+              </Row>
+              <Row label="Total lifetime">{permanent ? 'Until deleted' : formatDuration(lifetime)}</Row>
             </dl>
           </Card>
 
@@ -510,7 +531,7 @@ export default function TransferDetail({ pin, onBack, onPinChange, onDeleted, on
               </Row>
               <Row label="Plaintext size">{formatBytes(t.total_size)}</Row>
               <Row label="On disk">{t.disk_size ? formatBytes(t.disk_size) : '—'}{overhead > 0 && <span className="text-white/35"> (+{formatBytes(overhead)} auth tags)</span>}</Row>
-              <Row label="On expiry">Files unlinked, keys destroyed</Row>
+              <Row label={permanent ? 'On delete' : 'On expiry'}>Files unlinked, keys destroyed</Row>
             </dl>
           </Card>
 

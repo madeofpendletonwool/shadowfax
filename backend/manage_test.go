@@ -235,7 +235,7 @@ func TestExtendAndClampExpiry(t *testing.T) {
 	if code := doJSON(t, c, http.MethodPatch, url, map[string]any{"extend_secs": 86400}, &d); code != 200 {
 		t.Fatalf("extend got %d", code)
 	}
-	if got := d.ExpiresAt.Sub(tr.ExpiresAt); got < 86399*time.Second || got > 86401*time.Second {
+	if got := d.ExpiresAt.Sub(*tr.ExpiresAt); got < 86399*time.Second || got > 86401*time.Second {
 		t.Fatalf("extended by %v, want 24h", got)
 	}
 	if d.ExtendCount != 1 {
@@ -256,7 +256,7 @@ func TestExtendAndClampExpiry(t *testing.T) {
 
 	// Shortening is allowed and does not count as an extension.
 	doJSON(t, c, http.MethodPatch, url, map[string]any{"expires_in": 600}, &d)
-	if time.Until(d.ExpiresAt) > 601*time.Second || d.ExtendCount != 2 {
+	if time.Until(*d.ExpiresAt) > 601*time.Second || d.ExtendCount != 2 {
 		t.Fatalf("shorten: expires %v, extend_count %d", d.ExpiresAt, d.ExtendCount)
 	}
 }
@@ -380,5 +380,92 @@ func TestManagePINsAreRedactedFromLogs(t *testing.T) {
 		if got := redactPIN(in); got != want {
 			t.Fatalf("redactPIN(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestPermanentUpload(t *testing.T) {
+	srv, c := managedServer(t)
+	allowPermanent = true
+
+	body, ct := multipartBody(t, map[string]string{"keep.txt": "forever"}, "")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/transfer?expiry=never", body)
+	req.Header.Set("Content-Type", ct)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr TransferResponse
+	json.NewDecoder(resp.Body).Decode(&tr)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload got %d", resp.StatusCode)
+	}
+	if !tr.NeverExpires || tr.ExpiresAt != nil {
+		t.Fatalf("never_expires=%v expires_at=%v, want true/null", tr.NeverExpires, tr.ExpiresAt)
+	}
+
+	// The sweep must leave it alone, and it must still be fetchable.
+	cleanupExpired()
+	var got TransferResponse
+	if code := doJSON(t, c, http.MethodGet, srv.URL+"/api/transfer/"+tr.Pin, nil, &got); code != 200 || !got.NeverExpires {
+		t.Fatalf("lookup got %d never_expires=%v", code, got.NeverExpires)
+	}
+
+	var list struct {
+		manageListResp
+		Stats struct {
+			Permanent  int        `json:"permanent"`
+			NextExpiry *time.Time `json:"next_expiry"`
+		} `json:"stats"`
+	}
+	doJSON(t, c, http.MethodGet, srv.URL+"/api/manage/transfers", nil, &list)
+	if list.Stats.Permanent != 1 || list.Stats.NextExpiry != nil {
+		t.Fatalf("stats permanent=%d next_expiry=%v", list.Stats.Permanent, list.Stats.NextExpiry)
+	}
+
+	// Giving it a deadline again: extend_secs counts from now, not from year 9999.
+	url := srv.URL + "/api/manage/transfers/" + tr.Pin
+	var d manageTransfer
+	if code := doJSON(t, c, http.MethodPatch, url, map[string]any{"extend_secs": 3600}, &d); code != 200 {
+		t.Fatalf("extend permanent got %d", code)
+	}
+	if d.NeverExpires || d.ExpiresAt == nil || time.Until(*d.ExpiresAt) > 3601*time.Second {
+		t.Fatalf("after extend: never=%v expires=%v", d.NeverExpires, d.ExpiresAt)
+	}
+
+	if code := doJSON(t, c, http.MethodPatch, url, map[string]any{"never_expires": true}, &d); code != 200 {
+		t.Fatalf("make permanent got %d", code)
+	}
+	if !d.NeverExpires || d.ExpiresAt != nil {
+		t.Fatalf("after never_expires: never=%v expires=%v", d.NeverExpires, d.ExpiresAt)
+	}
+	if code := doJSON(t, c, http.MethodPatch, url, map[string]any{"never_expires": false}, nil); code != http.StatusBadRequest {
+		t.Fatalf("never_expires=false got %d, want 400", code)
+	}
+	if code := doJSON(t, c, http.MethodPatch, url, map[string]any{"never_expires": true, "expires_in": 3600}, nil); code != http.StatusBadRequest {
+		t.Fatalf("two expiry fields got %d, want 400", code)
+	}
+}
+
+func TestPermanentUploadDisabled(t *testing.T) {
+	srv, c := managedServer(t)
+	allowPermanent = false
+
+	body, ct := multipartBody(t, map[string]string{"a.txt": "x"}, "")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/transfer?expiry=never", body)
+	req.Header.Set("Content-Type", ct)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("never upload got %d, want 403", resp.StatusCode)
+	}
+
+	tr := sessionUpload(t, c, srv, map[string]string{"a.txt": "x"}, "")
+	if code := doJSON(t, c, http.MethodPatch, srv.URL+"/api/manage/transfers/"+tr.Pin,
+		map[string]any{"never_expires": true}, nil); code != http.StatusForbidden {
+		t.Fatalf("never_expires patch got %d, want 403", code)
 	}
 }

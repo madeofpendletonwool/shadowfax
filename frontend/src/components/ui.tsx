@@ -125,7 +125,10 @@ export function Card({ title, actions, children, className = '' }: {
   )
 }
 
-export function ExpiryBar({ createdAt, expiresAt, now }: { createdAt: string; expiresAt: string; now: number }) {
+export function ExpiryBar({ createdAt, expiresAt, now }: { createdAt: string; expiresAt: string | null; now: number }) {
+  if (!expiresAt) {
+    return <div className="h-1.5 bg-indigo-400/60 rounded-full" title="Never expires" />
+  }
   const start = new Date(createdAt).getTime()
   const end = new Date(expiresAt).getTime()
   const left = end - now

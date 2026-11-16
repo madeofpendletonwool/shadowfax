@@ -35,6 +35,7 @@ func newTestServer(t *testing.T, opts ...func()) *httptest.Server {
 	trustProxy = false
 	maxUploadBytes = 5 << 20
 	maxExpirySecs = 7 * 24 * 3600
+	allowPermanent = false
 	allowedOrigins = nil
 	lookupLimiter = newRateLimiter(10000, 20, time.Minute)
 	downloadLimiter = newRateLimiter(10000, 20, time.Minute)
@@ -388,7 +389,7 @@ func TestExpiryIsCapped(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&tr)
 
 	maxAllowed := time.Now().Add(time.Duration(maxExpirySecs)*time.Second + time.Minute)
-	if tr.ExpiresAt.After(maxAllowed) {
+	if tr.ExpiresAt == nil || tr.ExpiresAt.After(maxAllowed) {
 		t.Fatalf("expiry %v exceeds the cap", tr.ExpiresAt)
 	}
 }

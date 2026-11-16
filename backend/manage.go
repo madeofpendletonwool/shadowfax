@@ -164,7 +164,8 @@ type manageTransfer struct {
 	Pin            string        `json:"pin"`
 	Label          string        `json:"label"`
 	CreatedAt      time.Time     `json:"created_at"`
-	ExpiresAt      time.Time     `json:"expires_at"`
+	ExpiresAt      *time.Time    `json:"expires_at"` // null when it never expires
+	NeverExpires   bool          `json:"never_expires"`
 	MaxExpiresAt   time.Time     `json:"max_expires_at"`
 	ShareURL       string        `json:"share_url"`
 	ZipURL         string        `json:"zip_url,omitempty"`
@@ -182,7 +183,8 @@ type manageTransfer struct {
 	LastDownloadAt *time.Time    `json:"last_download_at,omitempty"`
 	Events         []manageEvent `json:"events,omitempty"`
 
-	id int64
+	id        int64
+	expiresAt time.Time
 }
 
 func contentTypeFor(name string) string {
@@ -204,13 +206,15 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanTransfer(row rowScanner) (manageTransfer, error) {
 	var t manageTransfer
 	var last sql.NullTime
-	err := row.Scan(&t.id, &t.Pin, &t.Label, &t.CreatedAt, &t.ExpiresAt,
+	err := row.Scan(&t.id, &t.Pin, &t.Label, &t.CreatedAt, &t.expiresAt,
 		&t.Upload.Method, &t.Upload.Auth, &t.Upload.IP, &t.Upload.UserAgent, &t.Upload.RequestedExpirySecs,
 		&t.ExtendCount, &t.DownloadCount, &last, &t.HasText)
 	if last.Valid {
 		lt := last.Time
 		t.LastDownloadAt = &lt
 	}
+	t.ExpiresAt = expiryJSON(t.expiresAt)
+	t.NeverExpires = isPermanent(t.expiresAt)
 	t.Files = []manageFile{}
 	t.Encrypted = true
 	return t, err
@@ -378,6 +382,7 @@ func handleManageList(w http.ResponseWriter, r *http.Request) {
 		Files      int        `json:"files"`
 		Bytes      int64      `json:"bytes"`
 		Downloads  int        `json:"downloads"`
+		Permanent  int        `json:"permanent"`
 		NextExpiry *time.Time `json:"next_expiry,omitempty"`
 	}
 	var s stats
@@ -388,8 +393,11 @@ func handleManageList(w http.ResponseWriter, r *http.Request) {
 		s.Files += t.FileCount
 		s.Bytes += t.TotalSize
 		s.Downloads += t.DownloadCount
-		if s.NextExpiry == nil || t.ExpiresAt.Before(*s.NextExpiry) {
-			exp := t.ExpiresAt
+		if t.NeverExpires {
+			s.Permanent++
+		}
+		if !t.NeverExpires && (s.NextExpiry == nil || t.expiresAt.Before(*s.NextExpiry)) {
+			exp := t.expiresAt
 			s.NextExpiry = &exp
 		}
 	}
@@ -399,6 +407,7 @@ func handleManageList(w http.ResponseWriter, r *http.Request) {
 		"stats":           s,
 		"server_time":     time.Now().UTC(),
 		"max_expiry_secs": maxExpirySecs,
+		"allow_permanent": allowPermanent,
 	})
 }
 
@@ -430,10 +439,13 @@ const minRemainingLife = time.Minute
 // PATCH /api/manage/transfers/{pin}
 //
 //	{"label": "...", "text": "...",
-//	 "extend_secs": 86400 | "expires_in": 3600 | "expires_at": "<RFC3339>"}
+//	 "extend_secs": 86400 | "expires_in": 3600 | "expires_at": "<RFC3339>" |
+//	 "never_expires": true}
 //
 // Any one expiry field moves the deadline; the result is clamped to
 // MAX_EXPIRY_SECONDS from now, the same ceiling a fresh upload gets.
+// never_expires makes the transfer permanent (when ALLOW_PERMANENT_UPLOADS is
+// on); any of the other expiry fields gives a permanent transfer a deadline again.
 func handleManageUpdate(w http.ResponseWriter, r *http.Request) {
 	t, ok := lookupManaged(w, r)
 	if !ok {
@@ -445,34 +457,54 @@ func handleManageUpdate(w http.ResponseWriter, r *http.Request) {
 		ExtendSecs *int64     `json:"extend_secs"`
 		ExpiresIn  *int64     `json:"expires_in"`
 		ExpiresAt  *time.Time `json:"expires_at"`
+		Never      *bool      `json:"never_expires"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest,
-			"expected JSON body with any of: label, text, extend_secs, expires_in, expires_at")
+			"expected JSON body with any of: label, text, extend_secs, expires_in, expires_at, never_expires")
 		return
 	}
 
 	expiryFields := 0
-	for _, set := range []bool{body.ExtendSecs != nil, body.ExpiresIn != nil, body.ExpiresAt != nil} {
+	for _, set := range []bool{body.ExtendSecs != nil, body.ExpiresIn != nil, body.ExpiresAt != nil, body.Never != nil} {
 		if set {
 			expiryFields++
 		}
 	}
 	if expiryFields > 1 {
-		writeError(w, http.StatusBadRequest, "send only one of extend_secs, expires_in, expires_at")
+		writeError(w, http.StatusBadRequest, "send only one of extend_secs, expires_in, expires_at, never_expires")
 		return
+	}
+	if body.Never != nil {
+		if !*body.Never {
+			writeError(w, http.StatusBadRequest,
+				"to give a transfer an expiry, send expires_in, expires_at or extend_secs")
+			return
+		}
+		if !allowPermanent {
+			writeError(w, http.StatusForbidden, "this server does not allow transfers that never expire")
+			return
+		}
 	}
 
 	now := time.Now().UTC()
 	var newExpiry *time.Time
 	clamped := false
-	if expiryFields == 1 {
+	if body.Never != nil {
+		target := neverExpires
+		newExpiry = &target
+	} else if expiryFields == 1 {
 		var target time.Time
 		switch {
 		case body.ExtendSecs != nil:
-			target = t.ExpiresAt.Add(time.Duration(*body.ExtendSecs) * time.Second)
+			// A permanent transfer has no deadline to extend; count from now.
+			base := t.expiresAt
+			if t.NeverExpires {
+				base = now
+			}
+			target = base.Add(time.Duration(*body.ExtendSecs) * time.Second)
 		case body.ExpiresIn != nil:
 			target = now.Add(time.Duration(*body.ExpiresIn) * time.Second)
 		default:
@@ -545,9 +577,9 @@ func handleManageUpdate(w http.ResponseWriter, r *http.Request) {
 		recordEvent(t.id, eventNoteEdited, detail, ip, ua)
 	}
 
-	if newExpiry != nil {
+	if newExpiry != nil && !(t.NeverExpires && isPermanent(*newExpiry)) {
 		bump := 0
-		if newExpiry.After(t.ExpiresAt) {
+		if newExpiry.After(t.expiresAt) {
 			bump = 1
 		}
 		if _, err := db.Exec(
@@ -556,7 +588,7 @@ func handleManageUpdate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		detail := fmt.Sprintf("%s → %s", t.ExpiresAt.UTC().Format(time.RFC3339), newExpiry.Format(time.RFC3339))
+		detail := fmt.Sprintf("%s → %s", describeExpiry(t.expiresAt), describeExpiry(*newExpiry))
 		if clamped {
 			detail += " (clamped to the server maximum)"
 		}

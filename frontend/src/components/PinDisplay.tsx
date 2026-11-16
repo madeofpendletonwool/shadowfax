@@ -150,7 +150,11 @@ export default function PinDisplay({ transfer, onSendAnother, onManage }: Props)
       <div className="glass rounded-2xl px-4 py-3 flex items-center gap-3">
         <div className="w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0" />
         <p className="text-sm text-white/60">
-          Expires in <span className="text-white font-medium">{formatExpiry(transfer.expires_at)}</span>
+          {transfer.expires_at ? (
+            <>Expires in <span className="text-white font-medium">{formatExpiry(transfer.expires_at)}</span></>
+          ) : (
+            <><span className="text-white font-medium">Never expires</span> &mdash; kept until you delete it</>
+          )}
         </p>
       </div>
 

@@ -41,6 +41,7 @@ var (
 	trustProxy     bool
 	maxUploadBytes int64
 	maxExpirySecs  int64
+	allowPermanent bool
 	allowedOrigins []string
 
 	lookupLimiter   *rateLimiter
@@ -55,14 +56,37 @@ type FileInfo struct {
 }
 
 type TransferResponse struct {
-	Pin       string     `json:"pin"`
-	ExpiresAt time.Time  `json:"expires_at"`
-	Files     []FileInfo `json:"files"`
-	Text      string     `json:"text,omitempty"`
-	ShareURL  string     `json:"share_url"`
-	ZipURL    string     `json:"zip_url,omitempty"`
-	Encrypted bool       `json:"encrypted"`
-	Message   string     `json:"message"`
+	Pin          string     `json:"pin"`
+	ExpiresAt    *time.Time `json:"expires_at"` // null when the transfer never expires
+	NeverExpires bool       `json:"never_expires"`
+	Files        []FileInfo `json:"files"`
+	Text         string     `json:"text,omitempty"`
+	ShareURL     string     `json:"share_url"`
+	ZipURL       string     `json:"zip_url,omitempty"`
+	Encrypted    bool       `json:"encrypted"`
+	Message      string     `json:"message"`
+}
+
+// neverExpires is the expires_at stored for a permanent transfer. A far-future
+// timestamp rather than NULL keeps every "expires_at > now" lookup and the
+// cleanup sweep correct with no special cases.
+var neverExpires = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+
+func isPermanent(t time.Time) bool { return t.Year() >= neverExpires.Year() }
+
+// expiryJSON is how an expiry goes out over the API: null means never.
+func expiryJSON(t time.Time) *time.Time {
+	if isPermanent(t) {
+		return nil
+	}
+	return &t
+}
+
+func describeExpiry(t time.Time) string {
+	if isPermanent(t) {
+		return "never"
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // ---------------------------------------------------------------- environment
@@ -153,16 +177,21 @@ func buildResponse(r *http.Request, pin string, expiresAt time.Time, files []Fil
 	if len(files) > 0 {
 		zipURL = fmt.Sprintf("%s/api/transfer/%s/zip", base, pin)
 	}
+	lifetime := "Expires " + describeExpiry(expiresAt) + "."
+	if isPermanent(expiresAt) {
+		lifetime = "It never expires; delete it when it is no longer needed."
+	}
 	return TransferResponse{
-		Pin:       pin,
-		ExpiresAt: expiresAt,
-		Files:     enriched,
-		Text:      text,
-		ShareURL:  fmt.Sprintf("%s/?pin=%s", base, pin),
-		ZipURL:    zipURL,
-		Encrypted: true,
-		Message: fmt.Sprintf("Share PIN %s or the link below to let someone download these files. Expires %s.",
-			pin, expiresAt.Format(time.RFC3339)),
+		Pin:          pin,
+		ExpiresAt:    expiryJSON(expiresAt),
+		NeverExpires: isPermanent(expiresAt),
+		Files:        enriched,
+		Text:         text,
+		ShareURL:     fmt.Sprintf("%s/?pin=%s", base, pin),
+		ZipURL:       zipURL,
+		Encrypted:    true,
+		Message: fmt.Sprintf("Share PIN %s or the link below to let someone download these files. %s",
+			pin, lifetime),
 	}
 }
 
@@ -419,11 +448,25 @@ func requestLogger(next http.Handler) http.Handler {
 
 // ------------------------------------------------------------------- uploads
 
-// parseExpiry reads ?expiry=<seconds>, clamped to MAX_EXPIRY_SECONDS so a
-// caller cannot pin data on the server indefinitely.
-func parseExpiry(r *http.Request) int64 {
+// expiryNeverValues are the ?expiry= spellings that ask for a permanent transfer.
+var expiryNeverValues = map[string]bool{"never": true, "forever": true, "permanent": true}
+
+// parseExpiry reads ?expiry=<seconds>|never and returns the deadline. Seconds
+// are clamped to MAX_EXPIRY_SECONDS; "never" is honoured only when
+// ALLOW_PERMANENT_UPLOADS is on, and is otherwise an error rather than a
+// silent clamp, so the caller is not surprised when the files vanish.
+func parseExpiry(w http.ResponseWriter, r *http.Request, now time.Time) (time.Time, bool) {
+	raw := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("expiry")))
+	if expiryNeverValues[raw] {
+		if !allowPermanent {
+			writeError(w, http.StatusForbidden,
+				fmt.Sprintf("this server does not allow uploads that never expire; use ?expiry=<seconds>, max %d", maxExpirySecs))
+			return time.Time{}, false
+		}
+		return neverExpires, true
+	}
 	expirySecs := int64(3600)
-	if raw := r.URL.Query().Get("expiry"); raw != "" {
+	if raw != "" {
 		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
 			expirySecs = v
 		}
@@ -431,7 +474,15 @@ func parseExpiry(r *http.Request) int64 {
 	if expirySecs > maxExpirySecs {
 		expirySecs = maxExpirySecs
 	}
-	return expirySecs
+	return now.Add(time.Duration(expirySecs) * time.Second), true
+}
+
+// requestedExpirySecs is what the upload log records: -1 for never.
+func requestedExpirySecs(now, expiresAt time.Time) int64 {
+	if isPermanent(expiresAt) {
+		return -1
+	}
+	return int64(expiresAt.Sub(now).Seconds())
 }
 
 func transferDir(pin string) string { return filepath.Join(dataDir, "files", pin) }
@@ -554,7 +605,7 @@ func writeTooLarge(w http.ResponseWriter) {
 		fmt.Sprintf("upload exceeds the %d byte limit", maxUploadBytes))
 }
 
-// POST /api/transfer?expiry=<seconds>
+// POST /api/transfer?expiry=<seconds>|never
 func handleUpload(w http.ResponseWriter, r *http.Request) {
 	if maxUploadBytes > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
@@ -572,7 +623,10 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
-	expiresAt := now.Add(time.Duration(parseExpiry(r)) * time.Second)
+	expiresAt, ok := parseExpiry(w, r, now)
+	if !ok {
+		return
+	}
 
 	staging, err := stageDir()
 	if err != nil {
@@ -601,7 +655,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	if auth := authMethodOf(r); auth == authSession || (auth == authNone && isBrowser(r)) {
 		method = "web"
 	}
-	meta := newUploadMeta(r, method, int64(expiresAt.Sub(now).Seconds()))
+	meta := newUploadMeta(r, method, requestedExpirySecs(now, expiresAt))
 	pin, err := commitTransfer(staging, pending, textContent, now, expiresAt, meta)
 	if err != nil {
 		log.Printf("commit transfer error: %v", err)
@@ -707,7 +761,10 @@ func handleRawUpload(w http.ResponseWriter, r *http.Request) {
 	displayName := sanitizeDisplayName(raw)
 
 	now := time.Now().UTC()
-	expiresAt := now.Add(time.Duration(parseExpiry(r)) * time.Second)
+	expiresAt, ok := parseExpiry(w, r, now)
+	if !ok {
+		return
+	}
 
 	staging, err := stageDir()
 	if err != nil {
@@ -740,7 +797,7 @@ func handleRawUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pending := []pendingFile{{displayName, storedName, written, wrapped}}
-	meta := newUploadMeta(r, "raw", int64(expiresAt.Sub(now).Seconds()))
+	meta := newUploadMeta(r, "raw", requestedExpirySecs(now, expiresAt))
 	pin, err := commitTransfer(staging, pending, "", now, expiresAt, meta)
 	if err != nil {
 		log.Printf("commit transfer error: %v", err)
@@ -1197,6 +1254,12 @@ func renderDocs(r *http.Request) string {
 		keyNote = `This server requires an API key. Add the header  -H "X-API-Key: <your key>"  to every upload/delete request (ask the operator for the key).`
 	}
 
+	neverNote := "Uploads that never expire are disabled on this server.\n"
+	if allowPermanent {
+		neverNote = "Or ?expiry=never to keep it until it is deleted; the response then has\n" +
+			"\"expires_at\": null and \"never_expires\": true.\n"
+	}
+
 	return fmt.Sprintf(`# Shadowfax - file transfer API (for humans and robots)
 
 Upload a file and you get back a %[5]d-digit PIN plus a share URL. Give the PIN or
@@ -1222,7 +1285,7 @@ Add more "-F files=@..." for multiple files, and "-F text=..." for a note.
 ## Optional: how long it lives
 Append ?expiry=<seconds> to either upload URL. Default 3600 (1h), max %[4]d.
 Common values: 3600 (1h), 21600 (6h), 86400 (1d), 259200 (3d), 604800 (7d).
-
+%[7]s
 ## What you get back (HTTP 201, JSON)
     {
       "pin": "%[6]s",
@@ -1249,12 +1312,13 @@ your address out for a while. Use the PIN you were given.
     GET    %[1]s/api/manage/transfers              -> every live transfer + stats
     GET    %[1]s/api/manage/transfers/<pin>        -> details, note, activity log
     PATCH  %[1]s/api/manage/transfers/<pin>        {"extend_secs": 86400} | {"expires_in": 3600}
-                                                   | {"expires_at": "<RFC3339>"} | {"label": "..."} | {"text": "..."}
+                                                   | {"expires_at": "<RFC3339>"} | {"never_expires": true}
+                                                   | {"label": "..."} | {"text": "..."}
     POST   %[1]s/api/manage/transfers/<pin>/rotate-pin   -> new PIN, old one revoked
     POST   %[1]s/api/manage/transfers/<pin>/files  (multipart "files") -> add files
     DELETE %[1]s/api/manage/transfers/<pin>/files/<id>
     DELETE %[1]s/api/manage/transfers/<pin>
-`, base, keyNote, keyHeader, maxExpirySecs, pinLength, strings.Repeat("1", pinLength))
+`, base, keyNote, keyHeader, maxExpirySecs, pinLength, strings.Repeat("1", pinLength), neverNote)
 }
 
 func handleDocs(w http.ResponseWriter, r *http.Request) {
@@ -1265,6 +1329,7 @@ func handleDocs(w http.ResponseWriter, r *http.Request) {
 			"api_key_required": apiKey != "",
 			"pin_length":       pinLength,
 			"max_expiry_secs":  maxExpirySecs,
+			"allow_permanent":  allowPermanent,
 			"max_upload_bytes": maxUploadBytes,
 			"encryption":       "AES-256-GCM at rest; per-file keys wrapped by a master key",
 			"endpoints": []map[string]string{
@@ -1275,7 +1340,7 @@ func handleDocs(w http.ResponseWriter, r *http.Request) {
 				{"method": "GET", "path": "/api/transfer/{pin}/zip", "desc": "download all files as zip"},
 				{"method": "GET", "path": "/api/manage/transfers", "desc": "auth: list every live transfer with stats"},
 				{"method": "GET", "path": "/api/manage/transfers/{pin}", "desc": "auth: transfer details and activity log"},
-				{"method": "PATCH", "path": "/api/manage/transfers/{pin}", "body": "JSON: label, text, extend_secs | expires_in | expires_at", "desc": "auth: edit or extend"},
+				{"method": "PATCH", "path": "/api/manage/transfers/{pin}", "body": "JSON: label, text, extend_secs | expires_in | expires_at | never_expires", "desc": "auth: edit or extend"},
 				{"method": "POST", "path": "/api/manage/transfers/{pin}/rotate-pin", "desc": "auth: issue a new PIN"},
 				{"method": "POST", "path": "/api/manage/transfers/{pin}/files", "body": "multipart/form-data (files)", "desc": "auth: add files"},
 				{"method": "DELETE", "path": "/api/manage/transfers/{pin}/files/{id}", "desc": "auth: remove one file"},
@@ -1297,6 +1362,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		"pin_length":       pinLength,
 		"max_upload_bytes": maxUploadBytes,
 		"max_expiry_secs":  maxExpirySecs,
+		"allow_permanent":  allowPermanent,
 		"api_key_required": apiKey != "",
 		"login_required":   authRequired(),
 		"encrypted":        true,
@@ -1360,6 +1426,9 @@ func loadConfig() {
 	if maxExpirySecs == 0 {
 		maxExpirySecs = 7 * 24 * 3600
 	}
+	// Permanent uploads default on only where uploads need a login, so an open
+	// instance cannot be filled with files that never go away.
+	allowPermanent = envBool("ALLOW_PERMANENT_UPLOADS", authRequired())
 
 	for _, o := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
 		if o = strings.TrimSpace(o); o != "" {

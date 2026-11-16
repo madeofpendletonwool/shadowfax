@@ -42,6 +42,7 @@ services:
       # --- limits ---------------------------------------------------------
       # - MAX_UPLOAD_BYTES=5368709120     # 5 GiB per request; 0 disables
       # - MAX_EXPIRY_SECONDS=604800       # 7 days
+      # - ALLOW_PERMANENT_UPLOADS=true    # allow ?expiry=never; default on only when a login is set
       # - RATE_LIMIT_LOOKUPS_PER_MIN=10
       # - RATE_LIMIT_DOWNLOADS_PER_MIN=60
       # - RATE_LIMIT_UPLOADS_PER_MIN=20

@@ -18,7 +18,8 @@ function readHash(): { uploads: boolean; pin: string | null } {
 
 export interface TransferInfo {
   pin: string
-  expires_at: string
+  expires_at: string | null // null when it never expires
+  never_expires?: boolean
   files: { name: string; size: number }[]
   text?: string
 }

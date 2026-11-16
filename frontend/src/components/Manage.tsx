@@ -124,14 +124,15 @@ export default function Manage({ selectedPin, onSelect, onUnauthorized, onNewUpl
         case 'api': return t.upload.method === 'raw' || t.upload.method === 'multipart'
         case 'note': return t.has_text
         case 'untouched': return t.download_count === 0
-        case 'expiring': return new Date(t.expires_at).getTime() - clock < 3600e3
+        case 'expiring': return !!t.expires_at && new Date(t.expires_at).getTime() - clock < 3600e3
         default: return true
       }
     })
     const by: Record<SortKey, (a: ManagedTransfer, b: ManagedTransfer) => number> = {
       newest: (a, b) => b.created_at.localeCompare(a.created_at),
       oldest: (a, b) => a.created_at.localeCompare(b.created_at),
-      expiring: (a, b) => a.expires_at.localeCompare(b.expires_at),
+      // Transfers that never expire sort after every deadline.
+      expiring: (a, b) => (a.expires_at ?? '\uffff').localeCompare(b.expires_at ?? '\uffff'),
       largest: (a, b) => b.total_size - a.total_size,
       downloads: (a, b) => b.download_count - a.download_count,
       name: (a, b) => transferTitle(a).localeCompare(transferTitle(b)),
@@ -197,7 +198,11 @@ export default function Manage({ selectedPin, onSelect, onUnauthorized, onNewUpl
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <Stat label="Transfers" value={String(stats?.transfers ?? '–')} />
+        <Stat
+          label="Transfers"
+          value={String(stats?.transfers ?? '–')}
+          hint={stats?.permanent ? `${stats.permanent} never expire${stats.permanent === 1 ? 's' : ''}` : undefined}
+        />
         <Stat label="Files" value={String(stats?.files ?? '–')} />
         <Stat label="Stored" value={stats ? formatBytes(stats.bytes) : '–'} hint="plaintext size" />
         <Stat
@@ -264,6 +269,11 @@ export default function Manage({ selectedPin, onSelect, onUnauthorized, onNewUpl
           >
             Extend to max
           </button>
+          {data?.allow_permanent && (
+            <button className={btn.ghost} disabled={busy} onClick={() => bulk(p => manageApi.update(p, { never_expires: true }))}>
+              Never expire
+            </button>
+          )}
           <ConfirmButton disabled={busy} onConfirm={() => bulk(p => manageApi.remove(p))} confirmLabel={`Delete ${selected.size}?`}>
             <Icons.Trash className="w-4 h-4" />
             Delete
@@ -304,7 +314,7 @@ export default function Manage({ selectedPin, onSelect, onUnauthorized, onNewUpl
 
         <ul className="divide-y divide-white/5">
           {visible.map(t => {
-            const left = new Date(t.expires_at).getTime() - now
+            const left = t.expires_at ? new Date(t.expires_at).getTime() - now : Infinity
             return (
               <li
                 key={t.pin}
@@ -346,7 +356,9 @@ export default function Manage({ selectedPin, onSelect, onUnauthorized, onNewUpl
                   </span>
                 </div>
                 <div className="w-24 sm:w-28 flex-shrink-0 space-y-1.5">
-                  <p className={`text-xs font-mono text-right tabular-nums ${expiryTone(left)}`}>{formatRemaining(left)}</p>
+                  <p className={`text-xs font-mono text-right tabular-nums ${expiryTone(left)}`}>
+                    {t.expires_at ? formatRemaining(left) : 'Never'}
+                  </p>
                   <ExpiryBar createdAt={t.created_at} expiresAt={t.expires_at} now={now} />
                 </div>
               </li>

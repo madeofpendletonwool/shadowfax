@@ -23,7 +23,8 @@ export interface ManagedTransfer {
   pin: string
   label: string
   created_at: string
-  expires_at: string
+  expires_at: string | null // null when it never expires
+  never_expires: boolean
   max_expires_at: string
   share_url: string
   zip_url?: string
@@ -50,9 +51,10 @@ export interface ManagedTransfer {
 
 export interface ManageList {
   transfers: ManagedTransfer[]
-  stats: { transfers: number; files: number; bytes: number; downloads: number; next_expiry?: string }
+  stats: { transfers: number; files: number; bytes: number; downloads: number; permanent?: number; next_expiry?: string }
   server_time: string
   max_expiry_secs: number
+  allow_permanent?: boolean
 }
 
 export class UnauthorizedError extends Error {

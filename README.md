@@ -30,7 +30,8 @@ curl -T ./build.zip https://your-host/api/upload/build.zip
 ## How it works
 
 1. **Send** — drag files into the browser (or `curl` them up). Optionally add a
-   text note and pick an expiry between 1 hour and 7 days.
+   text note and pick an expiry between 1 hour and 7 days, or *Never* when
+   permanent uploads are allowed.
 2. **Encrypt** — every byte is encrypted with AES-256-GCM as it streams to disk.
    Nothing is ever written in the clear.
 3. **Get a PIN** — the server returns a unique 6-digit PIN and a share link.
@@ -207,6 +208,7 @@ the two worth setting on any public instance are `ENCRYPTION_KEY` and `API_KEY`.
 |----------|---------|-------------|
 | `MAX_UPLOAD_BYTES` | `5368709120` (5 GiB) | Per-request upload ceiling. `0` disables it. |
 | `MAX_EXPIRY_SECONDS` | `604800` (7 days) | Upper bound on `?expiry=`; larger values are clamped. |
+| `ALLOW_PERMANENT_UPLOADS` | `true` if a login is set, else `false` | Allow uploads that never expire (`?expiry=never`, the *Never* option in the UI). Off by default on open instances so anonymous uploads cannot pile up forever. Turning it off later does not touch transfers that are already permanent. |
 | `RATE_LIMIT_LOOKUPS_PER_MIN` | `10` | PIN lookups per IP per minute. |
 | `RATE_LIMIT_DOWNLOADS_PER_MIN` | `60` | Downloads per IP per minute. |
 | `RATE_LIMIT_UPLOADS_PER_MIN` | `20` | Uploads per IP per minute. |
@@ -267,6 +269,10 @@ Append `?expiry=<seconds>` to either upload endpoint. Default `3600` (1 hour),
 clamped to `MAX_EXPIRY_SECONDS` (7 days by default). The UI offers 3600, 21600,
 86400, 259200, and 604800.
 
+`?expiry=never` keeps the transfer until someone deletes it. It needs
+`ALLOW_PERMANENT_UPLOADS`, and returns `403` when that is off. The response then
+has `"expires_at": null` and `"never_expires": true`.
+
 ### Response (HTTP 201)
 
 ```json
@@ -302,7 +308,7 @@ what you receive.
 | `DELETE` | `/api/transfer/{pin}` | API key | Delete a transfer immediately. |
 | `GET` | `/api/manage/transfers` | login | Every live transfer with provenance, files, and download stats. |
 | `GET` | `/api/manage/transfers/{pin}` | login | One transfer in full: decrypted note, on-disk sizes, activity log. |
-| `PATCH` | `/api/manage/transfers/{pin}` | login | Change `label`, `text`, or expiry (`extend_secs`, `expires_in`, or `expires_at`). |
+| `PATCH` | `/api/manage/transfers/{pin}` | login | Change `label`, `text`, or expiry (`extend_secs`, `expires_in`, `expires_at`, or `"never_expires": true`). Any timed field gives a permanent transfer an expiry again; `extend_secs` then counts from now. |
 | `POST` | `/api/manage/transfers/{pin}/rotate-pin` | login | Issue a new PIN; the old PIN and share link stop working. |
 | `POST` | `/api/manage/transfers/{pin}/files` | login | Add files (multipart `files`) to an existing transfer. |
 | `GET` | `/api/manage/transfers/{pin}/files/{id}` | login | Owner download; logged, but not counted as a recipient download. |
@@ -324,7 +330,9 @@ delete. Each transfer has a detail page where you can:
 
 - **Extend or shorten** its life: +1h/+6h/+1d/+3d, extend to the maximum, or
   set an exact time. Each change is capped at `MAX_EXPIRY_SECONDS` from *now*,
-  so you can keep a transfer alive for as long as you keep extending it.
+  so you can keep a transfer alive for as long as you keep extending it. Or
+  mark it **Never expire** (when `ALLOW_PERMANENT_UPLOADS` is on) and it stays
+  until you delete it.
 - **Rename** it, and add, edit, or remove its note. A new note is encrypted
   under a fresh key.
 - **Download** a single file or a zip, add more files, delete single files,

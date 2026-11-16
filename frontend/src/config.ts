@@ -4,6 +4,7 @@ export interface ServerConfig {
   pin_length: number
   max_upload_bytes: number
   max_expiry_secs: number
+  allow_permanent: boolean
   api_key_required: boolean
   login_required: boolean
   encrypted: boolean
@@ -15,6 +16,7 @@ const DEFAULTS: ServerConfig = {
   pin_length: 6,
   max_upload_bytes: 0,
   max_expiry_secs: 604800,
+  allow_permanent: false,
   api_key_required: false,
   login_required: false,
   encrypted: true,
